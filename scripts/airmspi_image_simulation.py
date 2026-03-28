@@ -21,11 +21,15 @@ import sys
 import time
 import yaml
 import argparse
+import json
+import hashlib
+import subprocess
 import numpy as np
 import xarray as xr
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple, Optional
+from datetime import datetime
 
 # External libs
 import at3d
@@ -358,6 +362,18 @@ def compute_vout_map_from_sensor(sensor_ds):
     v_out = -rays_world.T.reshape(ny, nx, 3)
     return v_out
 
+
+def _get_flight_azimuth_offset_deg_from_context(context_cfg: Any) -> float:
+    """
+    Optional yaw-like offset applied to VAA when manual trajectory azimuth is used.
+    """
+    if not isinstance(context_cfg, dict):
+        return 0.0
+    try:
+        return float(context_cfg.get("flight_azimuth_offset_deg", 0.0))
+    except Exception:
+        return 0.0
+
 def assign_latlon_from_grid(xg, yg, wrf_x, wrf_y, xlats, xlons):
     """
     将相机重投影地面坐标 (xg, yg) 映射为对应的 (lat, lon)。
@@ -587,6 +603,7 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
                 vz = np.clip(v_out_map[..., 2], -1.0, 1.0)
                 vza0 = np.degrees(np.arccos(vz))
                 vaa0 = (np.degrees(np.arctan2(v_out_map[..., 1], v_out_map[..., 0])) + 360.0) % 360.0
+                vaa0 = (vaa0 + _get_flight_azimuth_offset_deg_from_context(context_cfg)) % 360.0
                 saa = (context_cfg.get("solar_azimuth", 0.0) + 360.0) % 360.0 if isinstance(context_cfg, dict) else 0.0
                 sza = context_cfg.get("theta_0", np.nan) if isinstance(context_cfg, dict) else np.nan
                 raa0 = ((vaa0 - saa + 180.0) % 360.0) - 180.0
@@ -764,11 +781,13 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
     if option not in {"option1", "option2"}:
         raise ValueError("option must be 'option1' or 'option2'")
 
+    requested_level = os.path.basename(os.path.dirname(result_path)).lower()
     if output_dir is None:
-        output_dir = os.path.join(os.path.dirname(result_path), "replot")
+        output_dir = os.path.dirname(result_path)
     os.makedirs(output_dir, exist_ok=True)
 
     ext = os.path.splitext(result_path)[1].lower()
+    cloud_box = None  # (x_range, y_range) from input txt/cloud grid if available
     if ext == ".npz":
         if rebuild_if_missing and (overwrite_npz or (not os.path.exists(result_path))):
             _build_level_npz_from_original(result_path, overwrite=overwrite_npz)
@@ -802,6 +821,7 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
                 vz = np.clip(v_out_map[..., 2], -1.0, 1.0)
                 vza0 = np.degrees(np.arccos(vz))
                 vaa0 = (np.degrees(np.arctan2(v_out_map[..., 1], v_out_map[..., 0])) + 360.0) % 360.0
+                vaa0 = (vaa0 + _get_flight_azimuth_offset_deg_from_context(context_cfg)) % 360.0
 
                 saa = (context_cfg.get("solar_azimuth", 0.0) + 360.0) % 360.0
                 sza = context_cfg.get("theta_0", np.nan)
@@ -816,7 +836,7 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
                     view_name = str(sen_cfg.views_names[0])
                 else:
                     view_name = str(selected_key)
-                return I0, Q0, U0, vza0, vaa0, raa0, sca0, view_name
+                return I0, Q0, U0, vza0, vaa0, raa0, sca0, x0, y0, view_name
             except Exception:
                 return None
 
@@ -827,6 +847,8 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
                     "I": npz["I"], "Q": npz["Q"], "U": npz["U"],
                     "VZA": npz["VZA"], "VAA": npz["VAA"], "RAA": npz["RAA"],
                     "Scattering_Angle": npz["Scattering_Angle"],
+                    "x": npz["x"] if "x" in files else None,
+                    "y": npz["y"] if "y" in files else None,
                 }
             if {"I", "Q", "U"}.issubset(files):
                 vza = npz["VZA"] if "VZA" in files else npz["thetav"]
@@ -842,24 +864,55 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
                     mu = np.cos(np.radians(vza))
                     cos_sca = -mu0 * mu + np.sqrt(1 - mu0**2) * np.sqrt(1 - mu**2) * np.cos(np.radians(raa))
                     sca = np.degrees(np.arccos(np.clip(cos_sca, -1.0, 1.0)))
-                return {"I": npz["I"], "Q": npz["Q"], "U": npz["U"], "VZA": vza, "VAA": vaa, "RAA": raa, "Scattering_Angle": sca}
+                return {
+                    "I": npz["I"], "Q": npz["Q"], "U": npz["U"],
+                    "VZA": vza, "VAA": vaa, "RAA": raa, "Scattering_Angle": sca,
+                    "x": npz["x"] if "x" in files else None,
+                    "y": npz["y"] if "y" in files else None,
+                }
             return None
 
-        def _open_npz_with_iqu(npz_path):
+        def _open_npz_with_iqu(npz_path, allow_sensor_fallback=False):
             npz = np.load(npz_path, allow_pickle=True)
             payload = _extract_plot_fields(npz)
             if payload is not None:
                 npz.close()
                 return payload, npz_path
-            fallback = _try_load_from_sensor_dict(npz, view_hint=_infer_view_hint_from_filename(npz_path))
-            if fallback is not None:
-                npz.close()
-                return fallback, npz_path
+            if allow_sensor_fallback:
+                fallback = _try_load_from_sensor_dict(npz, view_hint=_infer_view_hint_from_filename(npz_path))
+                if fallback is not None:
+                    npz.close()
+                    return fallback, npz_path
             npz.close()
             return None, None
 
-        arr, _ = _open_npz_with_iqu(result_path)
-        if arr is None:
+        def _try_load_cloud_box(npz_path):
+            """Load cloud_x/y ranges (input txt box) from context if present."""
+            try:
+                npz = np.load(npz_path, allow_pickle=True)
+                files = set(npz.files)
+                if "context" not in files:
+                    npz.close()
+                    return None
+                ctx = npz["context"].item()
+                npz.close()
+                if not isinstance(ctx, dict):
+                    return None
+                xr = ctx.get("cloud_x_range")
+                yr = ctx.get("cloud_y_range")
+                if xr is None or yr is None or len(xr) != 2 or len(yr) != 2:
+                    return None
+                return (tuple(sorted((float(xr[0]), float(xr[1])))),
+                        tuple(sorted((float(yr[0]), float(yr[1])))))
+            except Exception:
+                return None
+
+        arr, used_path = _open_npz_with_iqu(result_path, allow_sensor_fallback=False)
+        cloud_box = _try_load_cloud_box(result_path)
+        if arr is None and requested_level == "original":
+            # 对 original 路径优先尝试其自身 metadata 回退，避免误跳转到 registered 层级。
+            arr, used_path = _open_npz_with_iqu(result_path, allow_sensor_fallback=True)
+        if arr is None and requested_level != "original":
             # 支持传入 original 元数据 npz：自动查找同名前缀的有效结果文件
             base = os.path.basename(result_path)
             cur_dir = os.path.dirname(result_path)
@@ -869,9 +922,23 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
                 cand = os.path.join(parent, d, base)
                 if not os.path.exists(cand):
                     continue
-                arr, _ = _open_npz_with_iqu(cand)
+                arr, used_path = _open_npz_with_iqu(cand, allow_sensor_fallback=False)
+                if cloud_box is None:
+                    cloud_box = _try_load_cloud_box(cand)
                 if arr is not None:
                     break
+        if cloud_box is None:
+            # 从 sibling original 获取 context（多数派生层级不含 context）
+            base = os.path.basename(result_path)
+            cur_dir = os.path.dirname(result_path)
+            parent = os.path.dirname(cur_dir)
+            original_cand = os.path.join(parent, "original", base)
+            if os.path.exists(original_cand):
+                cloud_box = _try_load_cloud_box(original_cand)
+        if arr is None:
+            # 最后兜底：仍允许直接从 metadata-only NPZ(sensor_dict) 读取，
+            # 但这通常是相机投影图，不一定等同于 registered/downsampled_registered。
+            arr, used_path = _open_npz_with_iqu(result_path, allow_sensor_fallback=True)
 
         if arr is None:
             arr_dbg = np.load(result_path, allow_pickle=True)
@@ -883,8 +950,10 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
                 "Please pass a data NPZ (e.g., downsampled_registered/*.npz)."
             )
 
+        x_plot = None
+        y_plot = None
         if isinstance(arr, tuple):
-            I, Q, U, vza, vaa, raa, sca, _ = arr
+            I, Q, U, vza, vaa, raa, sca, x_plot, y_plot, _ = arr
         else:
             I = arr["I"]
             Q = arr["Q"]
@@ -893,6 +962,30 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
             vaa = arr["VAA"]
             raa = arr["RAA"]
             sca = arr["Scattering_Angle"]
+            x_plot = arr.get("x")
+            y_plot = arr.get("y")
+        actual_level = os.path.basename(os.path.dirname(used_path or result_path)).lower()
+        force_image_plot = (actual_level == "original")
+
+        if (
+            cloud_box is not None and
+            isinstance(x_plot, np.ndarray) and isinstance(y_plot, np.ndarray) and
+            x_plot.shape == I.shape and y_plot.shape == I.shape and
+            (not force_image_plot)
+        ):
+            x_range, y_range = cloud_box
+            try:
+                x_base = x_plot
+                y_base = y_plot
+                I, x_plot, y_plot = crop_by_world_box(I, x_base, y_base, x_range, y_range)
+                Q, _, _ = crop_by_world_box(Q, x_base, y_base, x_range, y_range)
+                U, _, _ = crop_by_world_box(U, x_base, y_base, x_range, y_range)
+                vza, _, _ = crop_by_world_box(vza, x_base, y_base, x_range, y_range)
+                vaa, _, _ = crop_by_world_box(vaa, x_base, y_base, x_range, y_range)
+                raa, _, _ = crop_by_world_box(raa, x_base, y_base, x_range, y_range)
+                sca, _, _ = crop_by_world_box(sca, x_base, y_base, x_range, y_range)
+            except Exception:
+                pass
     elif ext == ".nc":
         ds = xr.open_dataset(result_path)
         view_idx = 0
@@ -915,11 +1008,41 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
     else:
         raise ValueError("Unsupported result file. Use .npz or .nc")
 
+    def _symmetric_limits_about_zero(data):
+        max_abs = np.nanmax(np.abs(data))
+        if (not np.isfinite(max_abs)) or max_abs <= 0:
+            max_abs = 1.0
+        return -float(max_abs), float(max_abs)
+
+    def _plot_field(ax, data, title, cmap, vmin=None, vmax=None):
+        use_ground = (
+            isinstance(x_plot, np.ndarray) and isinstance(y_plot, np.ndarray) and
+            x_plot.shape == data.shape and y_plot.shape == data.shape and
+            (not force_image_plot)
+        )
+        if use_ground:
+            xv, yv = centers_to_edges_2d(x_plot, y_plot)
+            im = ax.pcolormesh(xv, yv, data, shading="flat", cmap=cmap, vmin=vmin, vmax=vmax)
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_xlabel("x_ground [km]")
+            ax.set_ylabel("y_ground [km]")
+            if cloud_box is not None:
+                x_range, y_range = cloud_box
+                ax.set_xlim(*x_range)
+                ax.set_ylim(*y_range)
+        else:
+            im = ax.imshow(data, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.set_title(title)
+        return im
+
     if option == "option1":
         fig1, ax1 = plt.subplots(1, 3, figsize=(15, 4.5))
-        for ax, data, name, cmap in zip(ax1, [I, Q, U], ["I", "Q", "U"], ["viridis", "viridis", "viridis"]):
-            im = ax.imshow(data, origin="lower", cmap=cmap)
-            ax.set_title(name)
+        for ax, data, name, cmap in zip(ax1, [I, Q, U], ["I", "Q", "U"], ["viridis", "RdBu_r", "RdBu_r"]):
+            if name in {"Q", "U"}:
+                vmin, vmax = _symmetric_limits_about_zero(data)
+            else:
+                vmin = vmax = None
+            im = _plot_field(ax, data, name, cmap, vmin=vmin, vmax=vmax)
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         plt.tight_layout()
         out1 = os.path.join(output_dir, "IQU_panel.png")
@@ -934,8 +1057,7 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
         angle_titles = ["VZA", "VAA", "RAA", "Scattering Angle"]
         angle_cmaps = ["viridis", "viridis", "RdBu_r", "viridis"]
         for ax, data, title, cmap in zip(ax2.flatten(), angle_maps, angle_titles, angle_cmaps):
-            im = ax.imshow(data, origin="lower", cmap=cmap)
-            ax.set_title(title)
+            im = _plot_field(ax, data, title, cmap)
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         plt.tight_layout()
         out2 = os.path.join(output_dir, "Angles_panel.png")
@@ -947,8 +1069,8 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
     else:
         single_map = {
             "I": (I, "viridis"),
-            "Q": (Q, "viridis"),
-            "U": (U, "viridis"),
+            "Q": (Q, "RdBu_r"),
+            "U": (U, "RdBu_r"),
             "VZA": (vza, "viridis"),
             "VAA": (vaa, "viridis"),
             "RAA": (raa, "RdBu_r"),
@@ -956,8 +1078,11 @@ def plot_simulation_results(result_path, output_dir=None, option="option1", show
         }
         for name, (data, cmap) in single_map.items():
             fig, ax = plt.subplots(figsize=(6, 5))
-            im = ax.imshow(data, origin="lower", cmap=cmap)
-            ax.set_title(name)
+            if name in {"Q", "U"}:
+                vmin, vmax = _symmetric_limits_about_zero(data)
+            else:
+                vmin = vmax = None
+            im = _plot_field(ax, data, name, cmap, vmin=vmin, vmax=vmax)
             plt.colorbar(im, ax=ax)
             plt.tight_layout()
             outp = os.path.join(output_dir, f"{name}.png")
@@ -991,25 +1116,67 @@ def _read_lat_lon_from_txt(cloud_scatterer: xr.Dataset):
         if f not in cloud_scatterer:
             raise ValueError(f"cloud_scatterer 缺少必要字段 '{f}'，无法提取 lat/lon。")
 
-    # 取出坐标与字段
-    x_col = np.array(cloud_scatterer["x"])
-    y_col = np.array(cloud_scatterer["y"])
-    lat_col = np.array(cloud_scatterer["lat"])
-    lon_col = np.array(cloud_scatterer["lon"])
+    lat_da = cloud_scatterer["lat"]
+    lon_da = cloud_scatterer["lon"]
 
-    # 若数据为 1D 向量，尝试 reshape 成 2D 网格
-    if lat_col.ndim == 1 or lon_col.ndim == 1:
-        xs, ys = np.unique(x_col), np.unique(y_col)
-        nx, ny = len(xs), len(ys)
-        order = np.lexsort((x_col, y_col))  # 按 y, 再按 x 排序
-        lat_sorted = lat_col[order]
-        lon_sorted = lon_col[order]
-        lat_2d = lat_sorted[:ny * nx].reshape(ny, nx)
-        lon_2d = lon_sorted[:ny * nx].reshape(ny, nx)
+    # 优先处理 xarray 维度信息：若 lat/lon 含 x,y 以及额外维度(如 z)，
+    # 则沿额外维度取首层，再转成 (y, x)。
+    if {"x", "y"}.issubset(set(lat_da.dims)) and {"x", "y"}.issubset(set(lon_da.dims)):
+        for d in list(lat_da.dims):
+            if d not in {"x", "y"}:
+                lat_da = lat_da.isel({d: 0})
+        for d in list(lon_da.dims):
+            if d not in {"x", "y"}:
+                lon_da = lon_da.isel({d: 0})
+        lat_2d = lat_da.transpose("y", "x").values
+        lon_2d = lon_da.transpose("y", "x").values
+        return np.asarray(lat_2d), np.asarray(lon_2d)
+
+    # 回退：按平铺点表重建 2D（支持 lat/lon 是 1D 或更高维 flatten 的情况）
+    x_coord = np.asarray(cloud_scatterer["x"]).ravel()
+    y_coord = np.asarray(cloud_scatterer["y"]).ravel()
+    lat_col = np.asarray(lat_da).ravel()
+    lon_col = np.asarray(lon_da).ravel()
+
+    # 若 lat/lon 是 x-y-z 展平，x/y 可能是坐标轴长度而非同长度点表；
+    # 这里广播出同长度的点坐标。
+    if lat_col.size != x_coord.size or lon_col.size != y_coord.size:
+        X, Y = np.meshgrid(np.asarray(cloud_scatterer["x"]).ravel(),
+                           np.asarray(cloud_scatterer["y"]).ravel(),
+                           indexing="xy")
+        x_pts = X.ravel()
+        y_pts = Y.ravel()
+        rep = max(1, int(lat_col.size // max(1, x_pts.size)))
+        x_col = np.tile(x_pts, rep)[:lat_col.size]
+        y_col = np.tile(y_pts, rep)[:lat_col.size]
     else:
-        # 如果已经是 2D，直接返回
-        lat_2d = lat_col
-        lon_2d = lon_col
+        x_col = x_coord
+        y_col = y_coord
+
+    xs = np.unique(x_col)
+    ys = np.unique(y_col)
+    nx, ny = len(xs), len(ys)
+    lat_2d = np.full((ny, nx), np.nan, dtype=np.float32)
+    lon_2d = np.full((ny, nx), np.nan, dtype=np.float32)
+
+    # 对每个 (x,y) 仅取首个有效点（常见于存在 z 层时）。
+    order = np.lexsort((x_col, y_col))
+    x_sorted = x_col[order]
+    y_sorted = y_col[order]
+    lat_sorted = lat_col[order]
+    lon_sorted = lon_col[order]
+
+    seen = set()
+    for xx, yy, la, lo in zip(x_sorted, y_sorted, lat_sorted, lon_sorted):
+        key = (float(xx), float(yy))
+        if key in seen:
+            continue
+        seen.add(key)
+        ix = np.searchsorted(xs, xx)
+        iy = np.searchsorted(ys, yy)
+        if 0 <= ix < nx and 0 <= iy < ny:
+            lat_2d[iy, ix] = la
+            lon_2d[iy, ix] = lo
 
     return lat_2d, lon_2d
 
@@ -1288,6 +1455,15 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
                    up_vectors=up_vectors,
                    theta_0=theta_0,
                    solar_azimuth=solar_azimuth,
+                   trajectory_mode=sen.trajectory_mode,
+                   manual_flight_azimuth_deg=sen.manual_flight_azimuth_deg,
+                   fallback_heading_deg=sen.fallback_heading_deg,
+                   flight_azimuth_offset_deg=(
+                       float(sen.manual_flight_azimuth_deg) - float(sen.fallback_heading_deg)
+                       if str(getattr(sen, "trajectory_mode", "")).lower() == "manual_azimuth"
+                       and getattr(sen, "manual_flight_azimuth_deg", None) is not None
+                       else 0.0
+                   ),
                    lat=lat_2d,
                    lon=lon_2d,
                    cloud_x=cloud_x,
@@ -1333,15 +1509,16 @@ def build_versions_single_band(sensor_dict,
     I_ds = np.full((V, ny_ds, nx_ds), np.nan, dtype=np.float32)
     Q_ds = np.full_like(I_ds, np.nan); U_ds = np.full_like(I_ds, np.nan)
     DoLP_ds = np.full_like(I_ds, np.nan)
-    ny_gds = (grd.ny // dsm.factor)
-    nx_gds = (grd.nx // dsm.factor)
-    I_reg_ds = np.full((V, ny_gds, nx_gds), np.nan, dtype=np.float32)
-    Q_reg_ds = np.full_like(I_reg_ds, np.nan); U_reg_ds = np.full_like(I_reg_ds, np.nan)
-    DoLP_reg_ds = np.full_like(I_reg_ds, np.nan)
-    VZA_reg_ds = np.full_like(I_reg_ds, np.nan)
-    VAA_reg_ds = np.full_like(I_reg_ds, np.nan)
-    RAA_reg_ds = np.full_like(I_reg_ds, np.nan)
-    SCA_reg_ds = np.full_like(I_reg_ds, np.nan)
+    ny_gds = None
+    nx_gds = None
+    I_reg_ds = None
+    Q_reg_ds = None
+    U_reg_ds = None
+    DoLP_reg_ds = None
+    VZA_reg_ds = None
+    VAA_reg_ds = None
+    RAA_reg_ds = None
+    SCA_reg_ds = None
     thetav_o = np.zeros((V, cam_ny, cam_nx), dtype=np.float32)
     theta0_o = np.zeros_like(thetav_o); faipfai0_o = np.zeros_like(thetav_o)
     thetav_r = np.zeros((V, grd.ny, grd.nx), dtype=np.float32)
@@ -1361,6 +1538,15 @@ def build_versions_single_band(sensor_dict,
     def _unit(v, eps=1e-12):
         n = np.linalg.norm(v)
         return v / max(n, eps)
+
+    def _fit_to_shape(a: np.ndarray, target_shape: Tuple[int, int], fill_value=np.nan):
+        """Crop/pad 2D array to target_shape (top-left aligned)."""
+        ty, tx = target_shape
+        out = np.full((ty, tx), fill_value, dtype=a.dtype if np.issubdtype(a.dtype, np.floating) else np.float32)
+        sy = min(ty, a.shape[0])
+        sx = min(tx, a.shape[1])
+        out[:sy, :sx] = a[:sy, :sx]
+        return out
 
     def _stokes_rotate_QU(Q, U, chi):
         """Rotate (Q,U) by angle chi (radians) using standard Stokes rotation."""
@@ -1522,6 +1708,7 @@ def build_versions_single_band(sensor_dict,
         vz = np.clip(v_out_map[..., 2], -1.0, 1.0) 
         vza_map = np.degrees(np.arccos(vz)) # 像素级VZA 
         vaa_map = (np.degrees(np.arctan2(v_out_map[..., 1], v_out_map[..., 0])) + 360.0) % 360.0 # 像素级VAA 
+        vaa_map = (vaa_map + _get_flight_azimuth_offset_deg_from_context(context)) % 360.0
         saa = (context.get("solar_azimuth", 0.0) + 360.0) % 360.0 # 太阳方位（当前是场景常数） 
         sza = context.get("theta_0", np.nan) # 太阳天顶（当前是场景常数） 
         raa_map = ((vaa_map - saa + 180.0) % 360.0) - 180.0 # 像素级relative azimuth
@@ -1589,13 +1776,21 @@ def build_versions_single_band(sensor_dict,
      
                         
                 if is_polarized:
+                    q_lim = np.nanmax(np.abs(Q_brf))
+                    u_lim = np.nanmax(np.abs(U_brf))
+                    if (not np.isfinite(q_lim)) or q_lim <= 0:
+                        q_lim = 1.0
+                    if (not np.isfinite(u_lim)) or u_lim <= 0:
+                        u_lim = 1.0
                     plot_image(Q_brf, np.arange(1,I.shape[1]+2), np.arange(1,I.shape[0]+2),
                                title=f"{name} Q {int(wavelength_nm)} nm",
-                               cmap=plot_cfg.colormap, 
+                               cmap="RdBu_r",
+                               vmin=-q_lim, vmax=q_lim,
                                save_path=cam_png_Q, show=False)
                     plot_image(U_brf, np.arange(1,I.shape[1]+2), np.arange(1,I.shape[0]+2),
                                title=f"{name} U {int(wavelength_nm)} nm",
-                               cmap=plot_cfg.colormap, 
+                               cmap="RdBu_r",
+                               vmin=-u_lim, vmax=u_lim,
                                save_path=cam_png_U, show=False)
                 
                 
@@ -1662,13 +1857,19 @@ def build_versions_single_band(sensor_dict,
                 if is_polarized:
                     Q_g_c, _, _ = crop_by_world_box(Q_brf_g, xg_g, yg_g, crop_cfg.x_range, crop_cfg.y_range)
                     U_g_c, _, _ = crop_by_world_box(U_brf_g, xg_g, yg_g, crop_cfg.x_range, crop_cfg.y_range)
+                    qg_lim = np.nanmax(np.abs(Q_g_c))
+                    ug_lim = np.nanmax(np.abs(U_g_c))
+                    if (not np.isfinite(qg_lim)) or qg_lim <= 0:
+                        qg_lim = 1.0
+                    if (not np.isfinite(ug_lim)) or ug_lim <= 0:
+                        ug_lim = 1.0
                     plot_on_ground(Q_g_c, Xg_c, Yg_c,
                                    title=f"{name} Q {int(wavelength_nm)} nm",
-                                   cmap=plot_cfg.colormap,
+                                   cmap="RdBu_r", vmin=-qg_lim, vmax=qg_lim,
                                    save_path=terr_Q_png, show=False)
                     plot_on_ground(U_g_c, Xg_c, Yg_c,
                                    title=f"{name} U {int(wavelength_nm)} nm",
-                                   cmap=plot_cfg.colormap,
+                                   cmap="RdBu_r", vmin=-ug_lim, vmax=ug_lim,
                                    save_path=terr_U_png, show=False)
 
                 angle_products_reg = {
@@ -1706,6 +1907,24 @@ def build_versions_single_band(sensor_dict,
         vaa_gd = utils.downsample_block(vaa_g, dsm.factor, dsm.method)
         raa_gd = utils.downsample_block(raa_g, dsm.factor, dsm.method)
         sca_gd = utils.downsample_block(sca_g, dsm.factor, dsm.method)
+        if I_reg_ds is None:
+            ny_gds, nx_gds = I_gd.shape
+            I_reg_ds = np.full((V, ny_gds, nx_gds), np.nan, dtype=np.float32)
+            Q_reg_ds = np.full_like(I_reg_ds, np.nan); U_reg_ds = np.full_like(I_reg_ds, np.nan)
+            DoLP_reg_ds = np.full_like(I_reg_ds, np.nan)
+            VZA_reg_ds = np.full_like(I_reg_ds, np.nan)
+            VAA_reg_ds = np.full_like(I_reg_ds, np.nan)
+            RAA_reg_ds = np.full_like(I_reg_ds, np.nan)
+            SCA_reg_ds = np.full_like(I_reg_ds, np.nan)
+        if I_gd.shape != (ny_gds, nx_gds):
+            I_gd = _fit_to_shape(I_gd, (ny_gds, nx_gds))
+            Q_gd = _fit_to_shape(Q_gd, (ny_gds, nx_gds))
+            U_gd = _fit_to_shape(U_gd, (ny_gds, nx_gds))
+            DoLP_gd = _fit_to_shape(DoLP_gd, (ny_gds, nx_gds))
+            vza_gd = _fit_to_shape(vza_gd, (ny_gds, nx_gds))
+            vaa_gd = _fit_to_shape(vaa_gd, (ny_gds, nx_gds))
+            raa_gd = _fit_to_shape(raa_gd, (ny_gds, nx_gds))
+            sca_gd = _fit_to_shape(sca_gd, (ny_gds, nx_gds))
         I_reg_ds[iv] = I_gd
         Q_reg_ds[iv] = Q_gd
         U_reg_ds[iv] = U_gd
@@ -1799,6 +2018,17 @@ def build_versions_single_band(sensor_dict,
                             faipfai0=utils.downsample_block(faipfai0_r[iv], dsm.factor),
                             lat=lat_img_gd, lon=lon_img_gd, elevation=elevation_gds,
                             Height_AirMSPI=20000, Land_water_mask=Land_water_mask_gds)
+    if I_reg_ds is None:
+        ny_gds = max(1, grd.ny // dsm.factor)
+        nx_gds = max(1, grd.nx // dsm.factor)
+        I_reg_ds = np.full((V, ny_gds, nx_gds), np.nan, dtype=np.float32)
+        Q_reg_ds = np.full_like(I_reg_ds, np.nan); U_reg_ds = np.full_like(I_reg_ds, np.nan)
+        DoLP_reg_ds = np.full_like(I_reg_ds, np.nan)
+        VZA_reg_ds = np.full_like(I_reg_ds, np.nan)
+        VAA_reg_ds = np.full_like(I_reg_ds, np.nan)
+        RAA_reg_ds = np.full_like(I_reg_ds, np.nan)
+        SCA_reg_ds = np.full_like(I_reg_ds, np.nan)
+
     ds = xr.Dataset(
         data_vars=dict(
             I_original=(["view", "y", "x"], I_orig),
@@ -1841,6 +2071,60 @@ def build_versions_single_band(sensor_dict,
     return ds
 
 
+def _record_experiment_snapshot(cfg_path: str, cfg: Dict[str, Any], out_root: str) -> None:
+    """
+    Save per-run config snapshot and append a lightweight experiment log entry.
+    """
+    try:
+        os.makedirs(out_root, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+        cfg_text = ""
+        if cfg_path and os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg_text = f.read()
+        else:
+            cfg_text = yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
+
+        cfg_hash = hashlib.md5(cfg_text.encode("utf-8")).hexdigest()
+        snapshot_path = os.path.join(out_root, f"config_snapshot_{ts}.yaml")
+        with open(snapshot_path, "w", encoding="utf-8") as f:
+            f.write(cfg_text)
+
+        git_commit = "unknown"
+        try:
+            git_commit = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=os.path.dirname(__file__),
+                text=True
+            ).strip()
+        except Exception:
+            pass
+
+        sensor_cfg = cfg.get("sensor", {}) if isinstance(cfg, dict) else {}
+        traj_cfg = sensor_cfg.get("trajectory", {}) if isinstance(sensor_cfg, dict) else {}
+
+        record = {
+            "timestamp_utc": ts,
+            "root_dir": out_root,
+            "cfg_path": cfg_path,
+            "cfg_hash_md5": cfg_hash,
+            "git_commit": git_commit,
+            "trajectory_mode": traj_cfg.get("mode"),
+            "manual_flight_azimuth_deg": traj_cfg.get("manual_flight_azimuth_deg"),
+            "fallback_heading_deg": traj_cfg.get("fallback_heading_deg"),
+            "views_zenith_deg": sensor_cfg.get("views", {}).get("zenith_deg") if isinstance(sensor_cfg.get("views", {}), dict) else None,
+            "views_azimuth_deg": sensor_cfg.get("views", {}).get("azimuth_deg") if isinstance(sensor_cfg.get("views", {}), dict) else None,
+            "snapshot_file": os.path.basename(snapshot_path),
+        }
+
+        log_path = os.path.join(out_root, "experiment_log.jsonl")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"⚠️ Failed to record experiment snapshot: {e}")
+
+
 # =============================
 #%% Section 6: Main (per-wavelength)
 # =============================
@@ -1849,6 +2133,7 @@ def main(cfg_path: str = "config_v5b.yaml", only_band: Optional[int] = None,
          n_jobs: Optional[int] = None, overwrite: bool = False, clean_after_band: bool = True):
     (cfg, out_cfg, sen_cfg, bnd_cfg, dsm_cfg, svr_cfg, plt_cfg, grd_cfg, comp_cfg, crop_cfg,
      scene_cfg, cam_cfg, solar_cfg, solver_cfg, aerosol_cfg) = utils.load_config(cfg_path)
+    _record_experiment_snapshot(cfg_path, cfg, out_cfg.root_dir)
     subdirs = utils.ensure_dirs(out_cfg.root_dir, svr_cfg.versions)
     if n_jobs is None:
         n_jobs = comp_cfg.n_jobs or max(1, os.cpu_count() // 2)
