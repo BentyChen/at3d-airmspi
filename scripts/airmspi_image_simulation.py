@@ -673,6 +673,26 @@ def crop_by_world_box(data, xg, yg, x_range, y_range):
     yg_c = yg[row_slice, col_slice]
     return data_c, xg_c, yg_c
 
+
+def auto_align_ground_axes(xg: np.ndarray, yg: np.ndarray,
+                           x_range: Tuple[float, float], y_range: Tuple[float, float]):
+    """
+    Auto-detect whether x/y should be swapped to better match expected world ranges.
+    Returns (x_aligned, y_aligned, swapped_flag).
+    """
+    xr0, xr1 = min(x_range), max(x_range)
+    yr0, yr1 = min(y_range), max(y_range)
+    valid = np.isfinite(xg) & np.isfinite(yg)
+    if np.count_nonzero(valid) == 0:
+        return xg, yg, False
+    inside_no = ((xg >= xr0) & (xg <= xr1) & (yg >= yr0) & (yg <= yr1) & valid)
+    inside_sw = ((yg >= xr0) & (yg <= xr1) & (xg >= yr0) & (xg <= yr1) & valid)
+    score_no = float(np.count_nonzero(inside_no)) / float(np.count_nonzero(valid))
+    score_sw = float(np.count_nonzero(inside_sw)) / float(np.count_nonzero(valid))
+    if score_sw > score_no * 1.15:
+        return yg, xg, True
+    return xg, yg, False
+
 def plot_on_ground(data, xg, yg, title='', cmap='viridis', vmin=None, vmax=None, save_path=None, show=False):
     xv, yv = centers_to_edges_2d(xg, yg)
     fig, ax = plt.subplots(figsize=(7, 6))
@@ -851,6 +871,7 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
                         y_range = (max(float(min(yr)), y_range[0]), min(float(max(yr)), y_range[1]))
             except Exception:
                 pass
+        xg, yg, _ = auto_align_ground_axes(xg, yg, x_range, y_range)
 
         def _crop_all():
             out = {}
@@ -2188,6 +2209,9 @@ def build_versions_single_band(sensor_dict,
         # Ground crop window should match original CSV cloud x/y coverage.
         x_range = tuple(context.get("cloud_x_range", (grd.x_min, grd.x_max)))
         y_range = tuple(context.get("cloud_y_range", (grd.y_min, grd.y_max)))
+        xg, yg, swapped_xy = auto_align_ground_axes(xg, yg, x_range, y_range)
+        if swapped_xy:
+            print("⚠️ auto_align_ground_axes: swapped projected x/y for better world-range match.")
 
         # True registration: interpolate from curvilinear camera-ground points to regular ground grid.
         xg_g = Xg.astype(np.float32)
