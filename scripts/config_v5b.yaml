@@ -28,6 +28,12 @@ sensor:
     apply_flight_azimuth_offset_to_vaa: false  # 默认关闭：VAA直接来自几何；若需额外航向偏置再开启
     camera_image_transpose: false   # 是否对模拟图像做转置（仅用于对齐历史AirMSPI观测像元方向）
     camera_image_flip_lr: false     # 是否做左右翻转（仅用于复现实测图像方向）
+    use_aircraft_attitude: true
+    aircraft_heading_deg: 89.84
+    aircraft_pitch_deg: 0.53
+    aircraft_roll_deg: -0.26
+    aircraft_camera_pitch_relative_deg: 0.0
+    aircraft_camera_roll_relative_deg: 0.0
 
 # camera pixel grid for perspective_projection
 camera:

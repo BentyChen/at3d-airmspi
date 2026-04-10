@@ -1576,10 +1576,17 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
         camera_relative_roll_deg=sen.camera_relative_roll_deg,
         camera_align_with_flight_heading=sen.camera_align_with_flight_heading,
     )
-    # NOTE:
-    # Keep config-driven trajectory from `calculate_sensor_trajectory(...)`.
-    # Do not override with fixed aircraft attitude values here; that debug path
-    # can introduce unintended tilt/skew in registered outputs.
+    if getattr(sen, "use_aircraft_attitude", False):
+        position_vectors, up_vectors = calculate_sensor_trajectory_from_aircraft(
+            look_at_point=center,
+            sensor_altitude=sen.altitude_km,
+            heading_angle_deg=float(getattr(sen, "aircraft_heading_deg", 0.0)),
+            pitch_angle_deg=float(getattr(sen, "aircraft_pitch_deg", 0.0)),
+            roll_angle_deg=float(getattr(sen, "aircraft_roll_deg", 0.0)),
+            camera_pitch_relative_deg=float(getattr(sen, "aircraft_camera_pitch_relative_deg", 0.0)),
+            camera_roll_relative_deg=float(getattr(sen, "aircraft_camera_roll_relative_deg", 0.0)),
+            n_views=len(sen.views_names),
+        )
     lookat_vectors = [center for _ in sen.views_names]
     for name, pos, look, up in zip(sen.views_names, position_vectors, lookat_vectors, up_vectors):
         stokes = ['I', 'Q', 'U'] if is_polarized else ['I']
