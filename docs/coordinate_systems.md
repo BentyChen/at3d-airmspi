@@ -98,3 +98,15 @@ sensor:
 1. 观测产品像元排布与模型像平面定义不同（历史兼容常需转置/翻转）。
 2. 相机上方向跟随飞机航向，导致图像坐标轴相对世界旋转。
 3. 绘图时从 Camera Pixel 切换到 Ground（registered）后，坐标语义改变。
+
+---
+
+## 6) Aircraft 姿态模式下的角度约定（排错重点）
+
+- 在当前 NEU 定义下，`+x=North, +y=East, +z=Up`。
+- 若 `heading` 定义为“**从 North 开始顺时针**”（航空常用）：
+  - `heading=0°` 指向 `+x`（North）
+  - `heading=90°` 指向 `+y`（East）
+- 代码实现应满足：`math_rotation = -heading`（绕 `+z` 轴）。
+
+若这里误用了“从 +y 起算”或多做了 `90°` 偏移，通常会出现“地面 registered 整体歪斜/旋转”的症状。

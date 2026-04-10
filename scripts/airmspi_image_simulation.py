@@ -254,8 +254,9 @@ def _rotation_matrix_y(angle_deg):
 
 
 def _rotation_matrix_z(angle_deg):
-    # heading: cw from +y → convert to math (ccw from +x)
-    a = np.deg2rad(90 - angle_deg)
+    # heading: cw from +x (North) in NEU world.
+    # Convert to math rotation (ccw from +x): a = -heading.
+    a = np.deg2rad(-angle_deg)
     return np.array([
         [np.cos(a), -np.sin(a), 0],
         [np.sin(a),  np.cos(a), 0],
