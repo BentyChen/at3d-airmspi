@@ -891,9 +891,7 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
                     return np.full_like(Xg_reg, np.nan, dtype=np.float32)
                 pts = np.column_stack((xg[valid], yg[valid]))
                 vals = field[valid]
-                lin = griddata(pts, vals, (Xg_reg, Yg_reg), method="linear")
-                near = griddata(pts, vals, (Xg_reg, Yg_reg), method="nearest")
-                out = np.where(np.isfinite(lin), lin, near).astype(np.float32)
+                out = griddata(pts, vals, (Xg_reg, Yg_reg), method="linear").astype(np.float32)
                 outside = (
                     (Xg_reg < x_range[0]) | (Xg_reg > x_range[1]) |
                     (Yg_reg < y_range[0]) | (Yg_reg > y_range[1])
@@ -1890,9 +1888,7 @@ def build_versions_single_band(sensor_dict,
         pts = np.column_stack((x_src[valid], y_src[valid]))
         vals = field[valid]
 
-        lin = griddata(pts, vals, (x_dst, y_dst), method="linear")
-        near = griddata(pts, vals, (x_dst, y_dst), method="nearest")
-        out = np.where(np.isfinite(lin), lin, near).astype(np.float32)
+        out = griddata(pts, vals, (x_dst, y_dst), method="linear").astype(np.float32)
 
         inside = (x_dst >= x_range[0]) & (x_dst <= x_range[1]) & (y_dst >= y_range[0]) & (y_dst <= y_range[1])
         out[~inside] = np.nan
