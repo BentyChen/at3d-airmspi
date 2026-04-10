@@ -1139,6 +1139,37 @@ def plot_simulation_results(result_path, output_dir=None, option="panel", show=F
 
         arr, used_path = _open_npz_with_iqu(result_path, allow_sensor_fallback=False)
         cloud_box = _try_load_cloud_box(result_path)
+        def _looks_like_regular_ground_payload(payload: Dict[str, np.ndarray]) -> bool:
+            try:
+                x = payload.get("x")
+                y = payload.get("y")
+                i = payload.get("I")
+                q = payload.get("Q")
+                u = payload.get("U")
+                if not (isinstance(x, np.ndarray) and isinstance(y, np.ndarray)):
+                    return False
+                if not (x.shape == i.shape == q.shape == u.shape == y.shape):
+                    return False
+                # Regular ground meshgrid check (within tolerance)
+                x_row_ok = np.allclose(x, x[0:1, :], equal_nan=True)
+                y_col_ok = np.allclose(y, y[:, 0:1], equal_nan=True)
+                return bool(x_row_ok and y_col_ok)
+            except Exception:
+                return False
+
+        if (
+            rebuild_if_missing and
+            requested_level in {"registered", "downsampled_registered"} and
+            isinstance(arr, dict) and
+            (not _looks_like_regular_ground_payload(arr))
+        ):
+            # Existing NPZ may be legacy crop-based "registered"; force rebuild with new logic.
+            rebuilt = _build_level_npz_from_original(result_path, overwrite=True)
+            if rebuilt is not None:
+                arr, used_path = _open_npz_with_iqu(rebuilt, allow_sensor_fallback=False)
+                if cloud_box is None:
+                    cloud_box = _try_load_cloud_box(rebuilt)
+
         if arr is None and requested_level == "original":
             # 对 original 路径优先尝试其自身 metadata 回退，避免误跳转到 registered 层级。
             arr, used_path = _open_npz_with_iqu(result_path, allow_sensor_fallback=True)
