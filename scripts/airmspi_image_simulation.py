@@ -44,7 +44,7 @@ from at3dclass import (
 )
 import cartopy.crs as ccrs
 from scipy.ndimage import distance_transform_edt
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import RegularGridInterpolator, griddata
 
 _MIE_TABLE_CACHE: Dict[Tuple[float, float, float], Any] = {}
 # =============================
@@ -1797,6 +1797,32 @@ def build_versions_single_band(sensor_dict,
         out[:sy, :sx] = a[:sy, :sx]
         return out
 
+    def _regrid_to_regular_ground(
+        field: np.ndarray,
+        x_src: np.ndarray,
+        y_src: np.ndarray,
+        x_dst: np.ndarray,
+        y_dst: np.ndarray,
+        x_range: Tuple[float, float],
+        y_range: Tuple[float, float],
+    ) -> np.ndarray:
+        """Interpolate camera-curvilinear samples onto a regular ground grid."""
+        valid = np.isfinite(field) & np.isfinite(x_src) & np.isfinite(y_src)
+        valid &= (x_src >= x_range[0]) & (x_src <= x_range[1]) & (y_src >= y_range[0]) & (y_src <= y_range[1])
+        if np.count_nonzero(valid) < 4:
+            return np.full_like(x_dst, np.nan, dtype=np.float32)
+
+        pts = np.column_stack((x_src[valid], y_src[valid]))
+        vals = field[valid]
+
+        lin = griddata(pts, vals, (x_dst, y_dst), method="linear")
+        near = griddata(pts, vals, (x_dst, y_dst), method="nearest")
+        out = np.where(np.isfinite(lin), lin, near).astype(np.float32)
+
+        inside = (x_dst >= x_range[0]) & (x_dst <= x_range[1]) & (y_dst >= y_range[0]) & (y_dst <= y_range[1])
+        out[~inside] = np.nan
+        return out
+
     def _stokes_rotate_QU(Q, U, chi):
         """Rotate (Q,U) by angle chi (radians) using standard Stokes rotation."""
         c2 = np.cos(2.0 * chi)
@@ -2095,23 +2121,27 @@ def build_versions_single_band(sensor_dict,
         x_range = tuple(context.get("cloud_x_range", (grd.x_min, grd.x_max)))
         y_range = tuple(context.get("cloud_y_range", (grd.y_min, grd.y_max)))
 
-        # Intersect with actual projected coordinates to avoid empty windows.
-        x_min, x_max = np.nanmin(xg), np.nanmax(xg)
-        y_min, y_max = np.nanmin(yg), np.nanmax(yg)
-        x_range = (max(min(x_range), x_min), min(max(x_range), x_max))
-        y_range = (max(min(y_range), y_min), min(max(y_range), y_max))
-
-        I_brf_g, xg_g, yg_g, = crop_by_world_box(I_brf, xg, yg, x_range, y_range)
-        
-        Q_brf_g, _, _, = crop_by_world_box(Q_brf, xg, yg, x_range, y_range)
-        U_brf_g, _, _, = crop_by_world_box(U_brf, xg, yg, x_range, y_range)
-        vza_g, _, _, = crop_by_world_box(vza_map, xg, yg, x_range, y_range)
-        vaa_g, _, _, = crop_by_world_box(vaa_map, xg, yg, x_range, y_range)
-        raa_g, _, _, = crop_by_world_box(raa_map, xg, yg, x_range, y_range)
-        sca_g, _, _, = crop_by_world_box(sca_angle, xg, yg, x_range, y_range)
+        # True registration: interpolate from curvilinear camera-ground points to regular ground grid.
+        xg_g = Xg.astype(np.float32)
+        yg_g = Yg.astype(np.float32)
+        I_brf_g = _regrid_to_regular_ground(I_brf, xg, yg, Xg, Yg, x_range, y_range)
+        Q_brf_g = _regrid_to_regular_ground(Q_brf, xg, yg, Xg, Yg, x_range, y_range)
+        U_brf_g = _regrid_to_regular_ground(U_brf, xg, yg, Xg, Yg, x_range, y_range)
+        vza_g = _regrid_to_regular_ground(vza_map, xg, yg, Xg, Yg, x_range, y_range)
+        vaa_g = _regrid_to_regular_ground(vaa_map, xg, yg, Xg, Yg, x_range, y_range)
+        raa_g = _regrid_to_regular_ground(raa_map, xg, yg, Xg, Yg, x_range, y_range)
+        sca_g = _regrid_to_regular_ground(sca_angle, xg, yg, Xg, Yg, x_range, y_range)
         DoLP_brf_g = np.sqrt(Q_brf_g**2 + U_brf_g**2) / np.maximum(I_brf_g, 1e-12)
-        lat_img_g, _, _, = crop_by_world_box(lat_img, xg, yg, x_range, y_range)
-        lon_img_g, _, _, = crop_by_world_box(lon_img, xg, yg, x_range, y_range)
+        lat_img_g, lon_img_g = assign_latlon_from_grid(Xg, Yg, wrf_x, wrf_y, xlats, xlons)
+        outside = (Xg < x_range[0]) | (Xg > x_range[1]) | (Yg < y_range[0]) | (Yg > y_range[1])
+        lat_img_g = lat_img_g.astype(np.float32)
+        lon_img_g = lon_img_g.astype(np.float32)
+        lat_img_g[outside] = np.nan
+        lon_img_g[outside] = np.nan
+        I_reg[iv] = I_brf_g
+        Q_reg[iv] = Q_brf_g
+        U_reg[iv] = U_brf_g
+        DoLP_reg[iv] = DoLP_brf_g
         
         
         
