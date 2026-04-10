@@ -1156,12 +1156,13 @@ def plot_simulation_results(result_path, output_dir=None, option="panel", show=F
                 return False
 
         if (
-            rebuild_if_missing and
+            rebuild_if_missing and overwrite_npz and
             requested_level in {"registered", "downsampled_registered"} and
             isinstance(arr, dict) and
             (not _looks_like_regular_ground_payload(arr))
         ):
-            # Existing NPZ may be legacy crop-based "registered"; force rebuild with new logic.
+            # Legacy payload auto-upgrade is expensive on large camera grids;
+            # only do it when caller explicitly asks overwrite_npz=True.
             rebuilt = _build_level_npz_from_original(result_path, overwrite=True)
             if rebuilt is not None:
                 arr, used_path = _open_npz_with_iqu(rebuilt, allow_sensor_fallback=False)
