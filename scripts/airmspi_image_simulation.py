@@ -871,6 +871,50 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
             out["DoLP"] = np.sqrt(out["Q"] ** 2 + out["U"] ** 2) / np.maximum(out["I"], 1e-12)
             return out
 
+        def _regrid_registered_all():
+            """
+            Rebuild a true 'registered' payload on regular ground grid if `grd` metadata exists.
+            Fallback to crop-based behavior when regular grid metadata is unavailable.
+            """
+            if "grd" not in files:
+                return _crop_all()
+            try:
+                grd_cfg = arr["grd"].item()
+                Xg_reg, Yg_reg = make_ground_grid(grd_cfg)
+            except Exception:
+                return _crop_all()
+
+            def _regrid_field(field):
+                valid = np.isfinite(field) & np.isfinite(xg) & np.isfinite(yg)
+                valid &= (xg >= x_range[0]) & (xg <= x_range[1]) & (yg >= y_range[0]) & (yg <= y_range[1])
+                if np.count_nonzero(valid) < 4:
+                    return np.full_like(Xg_reg, np.nan, dtype=np.float32)
+                pts = np.column_stack((xg[valid], yg[valid]))
+                vals = field[valid]
+                lin = griddata(pts, vals, (Xg_reg, Yg_reg), method="linear")
+                near = griddata(pts, vals, (Xg_reg, Yg_reg), method="nearest")
+                out = np.where(np.isfinite(lin), lin, near).astype(np.float32)
+                outside = (
+                    (Xg_reg < x_range[0]) | (Xg_reg > x_range[1]) |
+                    (Yg_reg < y_range[0]) | (Yg_reg > y_range[1])
+                )
+                out[outside] = np.nan
+                return out
+
+            out = {
+                "x": Xg_reg.astype(np.float32),
+                "y": Yg_reg.astype(np.float32),
+            }
+            for k, v in {
+                "I": I, "Q": Q, "U": U,
+                "VZA": VZA, "VAA": VAA, "RAA": RAA, "Scattering_Angle": SCA,
+                "theta0": theta0, "thetav": thetav, "faipfai0": faipfai0,
+                "lat": lat, "lon": lon, "elevation": elevation, "Land_water_mask": land_water_mask,
+            }.items():
+                out[k] = _regrid_field(v)
+            out["DoLP"] = np.sqrt(out["Q"] ** 2 + out["U"] ** 2) / np.maximum(out["I"], 1e-12)
+            return out
+
         def _downsample_all(d):
             out = {}
             for k, v in d.items():
@@ -892,13 +936,13 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
         )
 
         if target_level == "registered":
-            payload = _crop_all()
+            payload = _regrid_registered_all()
             payload["Height_AirMSPI"] = h_airmspi
         elif target_level == "downsampled":
             payload = _downsample_all(base_payload)
             payload["Height_AirMSPI"] = h_airmspi
         else:
-            payload = _downsample_all(_crop_all())
+            payload = _downsample_all(_regrid_registered_all())
             payload["Height_AirMSPI"] = h_airmspi
 
         os.makedirs(os.path.dirname(target_npz_path), exist_ok=True)
