@@ -44,7 +44,7 @@ from at3dclass import (
 )
 import cartopy.crs as ccrs
 from scipy.ndimage import distance_transform_edt
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import RegularGridInterpolator, griddata
 
 _MIE_TABLE_CACHE: Dict[Tuple[float, float, float], Any] = {}
 # =============================
@@ -254,8 +254,9 @@ def _rotation_matrix_y(angle_deg):
 
 
 def _rotation_matrix_z(angle_deg):
-    # heading: cw from +y → convert to math (ccw from +x)
-    a = np.deg2rad(90 - angle_deg)
+    # heading: cw from +x (North) in NEU world.
+    # Convert to math rotation (ccw from +x): a = -heading.
+    a = np.deg2rad(-angle_deg)
     return np.array([
         [np.cos(a), -np.sin(a), 0],
         [np.sin(a),  np.cos(a), 0],
@@ -673,6 +674,33 @@ def crop_by_world_box(data, xg, yg, x_range, y_range):
     yg_c = yg[row_slice, col_slice]
     return data_c, xg_c, yg_c
 
+
+def auto_align_ground_axes(xg: np.ndarray, yg: np.ndarray,
+                           x_range: Tuple[float, float], y_range: Tuple[float, float],
+                           mode: str = "auto"):
+    """
+    Auto-detect whether x/y should be swapped to better match expected world ranges.
+    Returns (x_aligned, y_aligned, swapped_flag).
+    """
+    mode_l = str(mode).lower()
+    if mode_l == "swap":
+        return yg, xg, True
+    if mode_l in {"as_is", "asis", "none"}:
+        return xg, yg, False
+
+    xr0, xr1 = min(x_range), max(x_range)
+    yr0, yr1 = min(y_range), max(y_range)
+    valid = np.isfinite(xg) & np.isfinite(yg)
+    if np.count_nonzero(valid) == 0:
+        return xg, yg, False
+    inside_no = ((xg >= xr0) & (xg <= xr1) & (yg >= yr0) & (yg <= yr1) & valid)
+    inside_sw = ((yg >= xr0) & (yg <= xr1) & (xg >= yr0) & (xg <= yr1) & valid)
+    score_no = float(np.count_nonzero(inside_no)) / float(np.count_nonzero(valid))
+    score_sw = float(np.count_nonzero(inside_sw)) / float(np.count_nonzero(valid))
+    if score_sw > score_no * 1.15:
+        return yg, xg, True
+    return xg, yg, False
+
 def plot_on_ground(data, xg, yg, title='', cmap='viridis', vmin=None, vmax=None, save_path=None, show=False):
     xv, yv = centers_to_edges_2d(xg, yg)
     fig, ax = plt.subplots(figsize=(7, 6))
@@ -851,6 +879,13 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
                         y_range = (max(float(min(yr)), y_range[0]), min(float(max(yr)), y_range[1]))
             except Exception:
                 pass
+        mode = "auto"
+        if "sen" in files:
+            try:
+                mode = str(getattr(arr["sen"].item(), "projected_ground_xy_mode", "auto"))
+            except Exception:
+                mode = "auto"
+        xg, yg, _ = auto_align_ground_axes(xg, yg, x_range, y_range, mode=mode)
 
         def _crop_all():
             out = {}
@@ -868,6 +903,48 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
             out["lon"], _, _ = crop_by_world_box(lon, xg, yg, x_range, y_range)
             out["elevation"], _, _ = crop_by_world_box(elevation, xg, yg, x_range, y_range)
             out["Land_water_mask"], _, _ = crop_by_world_box(land_water_mask, xg, yg, x_range, y_range)
+            out["DoLP"] = np.sqrt(out["Q"] ** 2 + out["U"] ** 2) / np.maximum(out["I"], 1e-12)
+            return out
+
+        def _regrid_registered_all():
+            """
+            Rebuild a true 'registered' payload on regular ground grid if `grd` metadata exists.
+            Fallback to crop-based behavior when regular grid metadata is unavailable.
+            """
+            if "grd" not in files:
+                return _crop_all()
+            try:
+                grd_cfg = arr["grd"].item()
+                Xg_reg, Yg_reg = make_ground_grid(grd_cfg)
+            except Exception:
+                return _crop_all()
+
+            def _regrid_field(field):
+                valid = np.isfinite(field) & np.isfinite(xg) & np.isfinite(yg)
+                valid &= (xg >= x_range[0]) & (xg <= x_range[1]) & (yg >= y_range[0]) & (yg <= y_range[1])
+                if np.count_nonzero(valid) < 4:
+                    return np.full_like(Xg_reg, np.nan, dtype=np.float32)
+                pts = np.column_stack((xg[valid], yg[valid]))
+                vals = field[valid]
+                out = griddata(pts, vals, (Xg_reg, Yg_reg), method="linear").astype(np.float32)
+                outside = (
+                    (Xg_reg < x_range[0]) | (Xg_reg > x_range[1]) |
+                    (Yg_reg < y_range[0]) | (Yg_reg > y_range[1])
+                )
+                out[outside] = np.nan
+                return out
+
+            out = {
+                "x": Xg_reg.astype(np.float32),
+                "y": Yg_reg.astype(np.float32),
+            }
+            for k, v in {
+                "I": I, "Q": Q, "U": U,
+                "VZA": VZA, "VAA": VAA, "RAA": RAA, "Scattering_Angle": SCA,
+                "theta0": theta0, "thetav": thetav, "faipfai0": faipfai0,
+                "lat": lat, "lon": lon, "elevation": elevation, "Land_water_mask": land_water_mask,
+            }.items():
+                out[k] = _regrid_field(v)
             out["DoLP"] = np.sqrt(out["Q"] ** 2 + out["U"] ** 2) / np.maximum(out["I"], 1e-12)
             return out
 
@@ -892,13 +969,13 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
         )
 
         if target_level == "registered":
-            payload = _crop_all()
+            payload = _regrid_registered_all()
             payload["Height_AirMSPI"] = h_airmspi
         elif target_level == "downsampled":
             payload = _downsample_all(base_payload)
             payload["Height_AirMSPI"] = h_airmspi
         else:
-            payload = _downsample_all(_crop_all())
+            payload = _downsample_all(_regrid_registered_all())
             payload["Height_AirMSPI"] = h_airmspi
 
         os.makedirs(os.path.dirname(target_npz_path), exist_ok=True)
@@ -1095,6 +1172,38 @@ def plot_simulation_results(result_path, output_dir=None, option="panel", show=F
 
         arr, used_path = _open_npz_with_iqu(result_path, allow_sensor_fallback=False)
         cloud_box = _try_load_cloud_box(result_path)
+        def _looks_like_regular_ground_payload(payload: Dict[str, np.ndarray]) -> bool:
+            try:
+                x = payload.get("x")
+                y = payload.get("y")
+                i = payload.get("I")
+                q = payload.get("Q")
+                u = payload.get("U")
+                if not (isinstance(x, np.ndarray) and isinstance(y, np.ndarray)):
+                    return False
+                if not (x.shape == i.shape == q.shape == u.shape == y.shape):
+                    return False
+                # Regular ground meshgrid check (within tolerance)
+                x_row_ok = np.allclose(x, x[0:1, :], equal_nan=True)
+                y_col_ok = np.allclose(y, y[:, 0:1], equal_nan=True)
+                return bool(x_row_ok and y_col_ok)
+            except Exception:
+                return False
+
+        if (
+            rebuild_if_missing and overwrite_npz and
+            requested_level in {"registered", "downsampled_registered"} and
+            isinstance(arr, dict) and
+            (not _looks_like_regular_ground_payload(arr))
+        ):
+            # Legacy payload auto-upgrade is expensive on large camera grids;
+            # only do it when caller explicitly asks overwrite_npz=True.
+            rebuilt = _build_level_npz_from_original(result_path, overwrite=True)
+            if rebuilt is not None:
+                arr, used_path = _open_npz_with_iqu(rebuilt, allow_sensor_fallback=False)
+                if cloud_box is None:
+                    cloud_box = _try_load_cloud_box(rebuilt)
+
         if arr is None and requested_level == "original":
             # 对 original 路径优先尝试其自身 metadata 回退，避免误跳转到 registered 层级。
             arr, used_path = _open_npz_with_iqu(result_path, allow_sensor_fallback=True)
@@ -1502,21 +1611,17 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
         camera_relative_roll_deg=sen.camera_relative_roll_deg,
         camera_align_with_flight_heading=sen.camera_align_with_flight_heading,
     )
-    center_NEU = center
-    center_NEU[0], center_NEU[1] = center_NEU[1], center_NEU[0]
-    
-    position_vectors, up_vectors = calculate_sensor_trajectory_from_aircraft(
-        look_at_point=center_NEU,
-        sensor_altitude=sen.altitude_km,
-        heading_angle_deg = -0.16,
-        pitch_angle_deg = 0.53,
-        roll_angle_deg = -10.26,
-        camera_pitch_relative_deg = 0.0,   # 沿机身方向前后摆（关键参数）
-        camera_roll_relative_deg = 0.0,    # 相机自身roll
-        n_views = 1
+    if getattr(sen, "use_aircraft_attitude", False):
+        position_vectors, up_vectors = calculate_sensor_trajectory_from_aircraft(
+            look_at_point=center,
+            sensor_altitude=sen.altitude_km,
+            heading_angle_deg=float(getattr(sen, "aircraft_heading_deg", 0.0)),
+            pitch_angle_deg=float(getattr(sen, "aircraft_pitch_deg", 0.0)),
+            roll_angle_deg=float(getattr(sen, "aircraft_roll_deg", 0.0)),
+            camera_pitch_relative_deg=float(getattr(sen, "aircraft_camera_pitch_relative_deg", 0.0)),
+            camera_roll_relative_deg=float(getattr(sen, "aircraft_camera_roll_relative_deg", 0.0)),
+            n_views=len(sen.views_names),
         )
-    
-    center_NEU[0], center_NEU[1] = center_NEU[1], center_NEU[0]
     lookat_vectors = [center for _ in sen.views_names]
     for name, pos, look, up in zip(sen.views_names, position_vectors, lookat_vectors, up_vectors):
         stokes = ['I', 'Q', 'U'] if is_polarized else ['I']
@@ -1795,6 +1900,30 @@ def build_versions_single_band(sensor_dict,
         sy = min(ty, a.shape[0])
         sx = min(tx, a.shape[1])
         out[:sy, :sx] = a[:sy, :sx]
+        return out
+
+    def _regrid_to_regular_ground(
+        field: np.ndarray,
+        x_src: np.ndarray,
+        y_src: np.ndarray,
+        x_dst: np.ndarray,
+        y_dst: np.ndarray,
+        x_range: Tuple[float, float],
+        y_range: Tuple[float, float],
+    ) -> np.ndarray:
+        """Interpolate camera-curvilinear samples onto a regular ground grid."""
+        valid = np.isfinite(field) & np.isfinite(x_src) & np.isfinite(y_src)
+        valid &= (x_src >= x_range[0]) & (x_src <= x_range[1]) & (y_src >= y_range[0]) & (y_src <= y_range[1])
+        if np.count_nonzero(valid) < 4:
+            return np.full_like(x_dst, np.nan, dtype=np.float32)
+
+        pts = np.column_stack((x_src[valid], y_src[valid]))
+        vals = field[valid]
+
+        out = griddata(pts, vals, (x_dst, y_dst), method="linear").astype(np.float32)
+
+        inside = (x_dst >= x_range[0]) & (x_dst <= x_range[1]) & (y_dst >= y_range[0]) & (y_dst <= y_range[1])
+        out[~inside] = np.nan
         return out
 
     def _stokes_rotate_QU(Q, U, chi):
@@ -2094,24 +2223,34 @@ def build_versions_single_band(sensor_dict,
         # Ground crop window should match original CSV cloud x/y coverage.
         x_range = tuple(context.get("cloud_x_range", (grd.x_min, grd.x_max)))
         y_range = tuple(context.get("cloud_y_range", (grd.y_min, grd.y_max)))
+        xg, yg, swapped_xy = auto_align_ground_axes(
+            xg, yg, x_range, y_range,
+            mode=str(getattr(sen, "projected_ground_xy_mode", "auto"))
+        )
+        if swapped_xy:
+            print("⚠️ auto_align_ground_axes: swapped projected x/y for better world-range match.")
 
-        # Intersect with actual projected coordinates to avoid empty windows.
-        x_min, x_max = np.nanmin(xg), np.nanmax(xg)
-        y_min, y_max = np.nanmin(yg), np.nanmax(yg)
-        x_range = (max(min(x_range), x_min), min(max(x_range), x_max))
-        y_range = (max(min(y_range), y_min), min(max(y_range), y_max))
-
-        I_brf_g, xg_g, yg_g, = crop_by_world_box(I_brf, xg, yg, x_range, y_range)
-        
-        Q_brf_g, _, _, = crop_by_world_box(Q_brf, xg, yg, x_range, y_range)
-        U_brf_g, _, _, = crop_by_world_box(U_brf, xg, yg, x_range, y_range)
-        vza_g, _, _, = crop_by_world_box(vza_map, xg, yg, x_range, y_range)
-        vaa_g, _, _, = crop_by_world_box(vaa_map, xg, yg, x_range, y_range)
-        raa_g, _, _, = crop_by_world_box(raa_map, xg, yg, x_range, y_range)
-        sca_g, _, _, = crop_by_world_box(sca_angle, xg, yg, x_range, y_range)
+        # True registration: interpolate from curvilinear camera-ground points to regular ground grid.
+        xg_g = Xg.astype(np.float32)
+        yg_g = Yg.astype(np.float32)
+        I_brf_g = _regrid_to_regular_ground(I_brf, xg, yg, Xg, Yg, x_range, y_range)
+        Q_brf_g = _regrid_to_regular_ground(Q_brf, xg, yg, Xg, Yg, x_range, y_range)
+        U_brf_g = _regrid_to_regular_ground(U_brf, xg, yg, Xg, Yg, x_range, y_range)
+        vza_g = _regrid_to_regular_ground(vza_map, xg, yg, Xg, Yg, x_range, y_range)
+        vaa_g = _regrid_to_regular_ground(vaa_map, xg, yg, Xg, Yg, x_range, y_range)
+        raa_g = _regrid_to_regular_ground(raa_map, xg, yg, Xg, Yg, x_range, y_range)
+        sca_g = _regrid_to_regular_ground(sca_angle, xg, yg, Xg, Yg, x_range, y_range)
         DoLP_brf_g = np.sqrt(Q_brf_g**2 + U_brf_g**2) / np.maximum(I_brf_g, 1e-12)
-        lat_img_g, _, _, = crop_by_world_box(lat_img, xg, yg, x_range, y_range)
-        lon_img_g, _, _, = crop_by_world_box(lon_img, xg, yg, x_range, y_range)
+        lat_img_g, lon_img_g = assign_latlon_from_grid(Xg, Yg, wrf_x, wrf_y, xlats, xlons)
+        outside = (Xg < x_range[0]) | (Xg > x_range[1]) | (Yg < y_range[0]) | (Yg > y_range[1])
+        lat_img_g = lat_img_g.astype(np.float32)
+        lon_img_g = lon_img_g.astype(np.float32)
+        lat_img_g[outside] = np.nan
+        lon_img_g[outside] = np.nan
+        I_reg[iv] = I_brf_g
+        Q_reg[iv] = Q_brf_g
+        U_reg[iv] = U_brf_g
+        DoLP_reg[iv] = DoLP_brf_g
         
         
         
@@ -2475,7 +2614,7 @@ def main(cfg_path: str = "config_v5b.yaml", only_band: Optional[int] = None,
         cos_sca = np.clip(cos_sca, -1.0, 1.0)
         sca_angle = np.degrees(np.arccos(cos_sca))
         
-        data_plot = np.fliplr(vza_map)
+        data_plot = np.fliplr(vaa_map)
         min_idx = np.nanargmin(data_plot)   # 忽略 NaN
         min_row, min_col = np.unravel_index(min_idx, data_plot.shape)
         min_val = data_plot[min_row, min_col]

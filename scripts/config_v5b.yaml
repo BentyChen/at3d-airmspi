@@ -3,8 +3,8 @@
 # =============================
 
 output:
-  root_dir: "output/airmspi_sim_5_23"
-  save_png: true
+  root_dir: "output/airmspi_sim_5_25"
+  save_png: false
   save_nc: true
   plot_mode: "overwrite"   # "skip" | "if_missing" | "overwrite"
   png_dpi: 300
@@ -28,29 +28,36 @@ sensor:
     apply_flight_azimuth_offset_to_vaa: false  # 默认关闭：VAA直接来自几何；若需额外航向偏置再开启
     camera_image_transpose: false   # 是否对模拟图像做转置（仅用于对齐历史AirMSPI观测像元方向）
     camera_image_flip_lr: false     # 是否做左右翻转（仅用于复现实测图像方向）
+    use_aircraft_attitude: true
+    aircraft_heading_deg: 89.84
+    aircraft_pitch_deg: 0.53
+    aircraft_roll_deg: -0.26
+    aircraft_camera_pitch_relative_deg: 0.0
+    aircraft_camera_roll_relative_deg: 0.0
+    projected_ground_xy_mode: "swap"  # "auto" | "as_is" | "swap"
 
 # camera pixel grid for perspective_projection
 camera:
   x_resolution: 2000
-  y_resolution: 3072
+  y_resolution: 2000
 
 # scene source and camera look-at point (km)
 scene:
-  input_path: "../data/synthetic_cloud_fields/jpl_les/firex_case21_test143_multiview-single-layer_coarse_shdom_coordinate.txt"
-  lookat_center_km: [3.8, 4.5, 0.0]  # 关键参数：平移VZA“最低点”在图上的位置（不必在区域几何中心）
+  input_path: "../data/synthetic_cloud_fields/jpl_les/firex_case21_test143_multiview-single-layer_coarse_NEU_coordinate.txt"
+  lookat_center_km: [4.5, 3.8, 0.0]  # 关键参数：平移VZA“最低点”在图上的位置（不必在区域几何中心）
 
 # solar geometry in geophysical convention
 solar:
   sza_deg: 35.5    # 主要影响散射角绝对值范围（与VZA共同决定）
-  saa_deg: -55.0   # 主要影响RAA和散射角的方向梯度
+  saa_deg: 35.0   # 主要影响RAA和散射角的方向梯度
 
 # radiative transfer solver parameters
 solver:
   x_boundary_condition: "open"
   y_boundary_condition: "open"
-  num_mu_bins: 24
-  num_phi_bins: 24
-  split_accuracy: 0.05
+  num_mu_bins: 12
+  num_phi_bins: 12
+  split_accuracy: 0.1
   deltam: true
 
 # aerosol optical setup
