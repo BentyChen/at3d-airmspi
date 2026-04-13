@@ -676,11 +676,18 @@ def crop_by_world_box(data, xg, yg, x_range, y_range):
 
 
 def auto_align_ground_axes(xg: np.ndarray, yg: np.ndarray,
-                           x_range: Tuple[float, float], y_range: Tuple[float, float]):
+                           x_range: Tuple[float, float], y_range: Tuple[float, float],
+                           mode: str = "auto"):
     """
     Auto-detect whether x/y should be swapped to better match expected world ranges.
     Returns (x_aligned, y_aligned, swapped_flag).
     """
+    mode_l = str(mode).lower()
+    if mode_l == "swap":
+        return yg, xg, True
+    if mode_l in {"as_is", "asis", "none"}:
+        return xg, yg, False
+
     xr0, xr1 = min(x_range), max(x_range)
     yr0, yr1 = min(y_range), max(y_range)
     valid = np.isfinite(xg) & np.isfinite(yg)
@@ -872,7 +879,13 @@ def _build_level_npz_from_original(target_npz_path: str, overwrite: bool = False
                         y_range = (max(float(min(yr)), y_range[0]), min(float(max(yr)), y_range[1]))
             except Exception:
                 pass
-        xg, yg, _ = auto_align_ground_axes(xg, yg, x_range, y_range)
+        mode = "auto"
+        if "sen" in files:
+            try:
+                mode = str(getattr(arr["sen"].item(), "projected_ground_xy_mode", "auto"))
+            except Exception:
+                mode = "auto"
+        xg, yg, _ = auto_align_ground_axes(xg, yg, x_range, y_range, mode=mode)
 
         def _crop_all():
             out = {}
@@ -2210,7 +2223,10 @@ def build_versions_single_band(sensor_dict,
         # Ground crop window should match original CSV cloud x/y coverage.
         x_range = tuple(context.get("cloud_x_range", (grd.x_min, grd.x_max)))
         y_range = tuple(context.get("cloud_y_range", (grd.y_min, grd.y_max)))
-        xg, yg, swapped_xy = auto_align_ground_axes(xg, yg, x_range, y_range)
+        xg, yg, swapped_xy = auto_align_ground_axes(
+            xg, yg, x_range, y_range,
+            mode=str(getattr(sen, "projected_ground_xy_mode", "auto"))
+        )
         if swapped_xy:
             print("⚠️ auto_align_ground_axes: swapped projected x/y for better world-range match.")
 

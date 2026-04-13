@@ -59,6 +59,7 @@ def load_config(cfg_path: str):
         aircraft_roll_deg=float(trajectory_cfg.get("aircraft_roll_deg", 0.0)),
         aircraft_camera_pitch_relative_deg=float(trajectory_cfg.get("aircraft_camera_pitch_relative_deg", 0.0)),
         aircraft_camera_roll_relative_deg=float(trajectory_cfg.get("aircraft_camera_roll_relative_deg", 0.0)),
+        projected_ground_xy_mode=str(trajectory_cfg.get("projected_ground_xy_mode", "auto")),
     )
     bnd = BandsConfig(
         wavelength_nm=[int(w) for w in cfg["bands"]["wavelength_nm"]],

@@ -34,6 +34,7 @@ sensor:
     aircraft_roll_deg: -0.26
     aircraft_camera_pitch_relative_deg: 0.0
     aircraft_camera_roll_relative_deg: 0.0
+    projected_ground_xy_mode: "swap"  # "auto" | "as_is" | "swap"
 
 # camera pixel grid for perspective_projection
 camera:

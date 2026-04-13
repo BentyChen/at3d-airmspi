@@ -40,6 +40,7 @@ class SensorConfig:
     aircraft_roll_deg: float = 0.0
     aircraft_camera_pitch_relative_deg: float = 0.0
     aircraft_camera_roll_relative_deg: float = 0.0
+    projected_ground_xy_mode: str = "auto"  # "auto" | "as_is" | "swap"
 
 @dataclass
 class BandsConfig:
