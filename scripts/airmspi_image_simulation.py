@@ -341,6 +341,105 @@ def calculate_sensor_trajectory_from_aircraft(
         up_vectors.append(up_vec.copy())
 
     return np.array(positions), np.array(up_vectors)
+
+
+def _build_cross_track_scan_views(
+        cross_track_cfg: Dict[str, Any],
+        fallback_altitude_km: float,
+        default_target_z_km: float = 0.0,
+):
+    """
+    Build a SHDOM-style cross-track scan trajectory.
+
+    Parameters in ``cross_track_cfg`` (all required unless noted):
+      x1,y1,z1,x2,y2,z2, spacing, scan1, scan2, delscan
+      nbytes, scale are accepted but not used in AT3D geometry generation.
+    """
+    if not isinstance(cross_track_cfg, dict):
+        raise ValueError("sensor.trajectory.cross_track must be a dictionary.")
+
+    required = ("x1", "y1", "z1", "x2", "y2", "z2", "spacing", "scan1", "scan2", "delscan")
+    missing = [k for k in required if k not in cross_track_cfg]
+    if missing:
+        raise ValueError(f"Missing cross_track fields: {missing}")
+
+    start = np.array([float(cross_track_cfg["x1"]), float(cross_track_cfg["y1"]), float(cross_track_cfg["z1"])], dtype=float)
+    end = np.array([float(cross_track_cfg["x2"]), float(cross_track_cfg["y2"]), float(cross_track_cfg["z2"])], dtype=float)
+    spacing = float(cross_track_cfg["spacing"])
+    scan1 = float(cross_track_cfg["scan1"])
+    scan2 = float(cross_track_cfg["scan2"])
+    delscan = float(cross_track_cfg["delscan"])
+    target_z = float(cross_track_cfg.get("target_z_km", default_target_z_km))
+
+    if spacing <= 0.0:
+        raise ValueError("cross_track.spacing must be > 0.")
+    if delscan <= 0.0:
+        raise ValueError("cross_track.delscan must be > 0.")
+
+    track_vec = end - start
+    track_len = np.linalg.norm(track_vec)
+    if track_len < 1e-9:
+        raise ValueError("cross_track start/end are identical; track length is zero.")
+    track_dir = track_vec / track_len
+
+    n_steps = int(np.floor(track_len / spacing))
+    along = np.arange(n_steps + 1, dtype=float) * spacing
+    if along.size == 0 or (track_len - along[-1]) > 1e-9:
+        along = np.append(along, track_len)
+    positions = start[None, :] + along[:, None] * track_dir[None, :]
+    if np.all(np.isclose(positions[:, 2], 0.0)):
+        positions[:, 2] = fallback_altitude_km
+
+    scan_angles = np.arange(scan1, scan2 + 0.5 * delscan, delscan, dtype=float)
+    if scan_angles.size == 0:
+        raise ValueError("No cross-track scan angles generated; check scan1/scan2/delscan.")
+
+    views_names, views_zenith_deg, views_azimuth_deg = [], [], []
+    out_positions, lookat_vectors, up_vectors = [], [], []
+
+    for i_scan, pos in enumerate(positions):
+        for ang in scan_angles:
+            look_dir = _rotate_vector_about_axis(
+                v=np.array([0.0, 0.0, -1.0], dtype=float),
+                axis=track_dir,
+                angle_deg=float(ang),
+            )
+            look_dir = look_dir / max(np.linalg.norm(look_dir), 1e-12)
+
+            if abs(look_dir[2]) > 1e-9:
+                t = (target_z - pos[2]) / look_dir[2]
+                if t <= 0.0:
+                    t = abs(pos[2] - target_z) / max(abs(look_dir[2]), 1e-9)
+            else:
+                t = max(abs(pos[2] - target_z), 1.0)
+            lookat = pos + t * look_dir
+
+            up_vec = np.cross(track_dir, look_dir)
+            if np.linalg.norm(up_vec) < 1e-9:
+                up_vec = np.array([0.0, 1.0, 0.0], dtype=float)
+            up_vec = up_vec / max(np.linalg.norm(up_vec), 1e-12)
+
+            zenith = np.rad2deg(np.arccos(np.clip(-look_dir[2], -1.0, 1.0)))
+            azimuth = np.mod(np.rad2deg(np.arctan2(look_dir[1], look_dir[0])), 360.0)
+
+            ang_tag = f"{ang:+06.1f}".replace("+", "p").replace("-", "m")
+            views_names.append(f"ct_s{i_scan:03d}_a{ang_tag}")
+            views_zenith_deg.append(float(zenith))
+            views_azimuth_deg.append(float(azimuth))
+            out_positions.append(pos.copy())
+            lookat_vectors.append(lookat)
+            up_vectors.append(up_vec)
+
+    return (
+        np.asarray(out_positions),
+        np.asarray(lookat_vectors),
+        np.asarray(up_vectors),
+        views_names,
+        views_zenith_deg,
+        views_azimuth_deg,
+    )
+
+
 def project_to_ground_lookat(img, pos, look_at_point, up_vector, fov_diag_deg, Xg, Yg):
     ny, nx = img.shape
     img_ground = np.full(Xg.shape, np.nan, dtype=np.float32)
@@ -1600,18 +1699,36 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
     sensor_dict = at3d.containers.SensorsDict()
     center = np.array(scene_cfg.lookat_center_km, dtype=float)
     t0 = time.perf_counter()
-    position_vectors, up_vectors = calculate_sensor_trajectory(
-        sensor_zenith_list=sen.views_zenith_deg,
-        sensor_azimuth_list=sen.views_azimuth_deg,
-        look_at_point=center,
-        sensor_altitude=sen.altitude_km,
-        trajectory_mode=sen.trajectory_mode,
-        fallback_heading_deg=sen.fallback_heading_deg,
-        manual_flight_azimuth_deg=sen.manual_flight_azimuth_deg,
-        camera_relative_roll_deg=sen.camera_relative_roll_deg,
-        camera_align_with_flight_heading=sen.camera_align_with_flight_heading,
-    )
-    if getattr(sen, "use_aircraft_attitude", False):
+    lookat_vectors = None
+    if str(getattr(sen, "trajectory_mode", "")).lower() == "cross_track":
+        (
+            position_vectors,
+            lookat_vectors,
+            up_vectors,
+            cross_names,
+            cross_zenith,
+            cross_azimuth,
+        ) = _build_cross_track_scan_views(
+            cross_track_cfg=getattr(sen, "cross_track", None),
+            fallback_altitude_km=sen.altitude_km,
+            default_target_z_km=float(center[2]),
+        )
+        sen.views_names = cross_names
+        sen.views_zenith_deg = cross_zenith
+        sen.views_azimuth_deg = cross_azimuth
+    else:
+        position_vectors, up_vectors = calculate_sensor_trajectory(
+            sensor_zenith_list=sen.views_zenith_deg,
+            sensor_azimuth_list=sen.views_azimuth_deg,
+            look_at_point=center,
+            sensor_altitude=sen.altitude_km,
+            trajectory_mode=sen.trajectory_mode,
+            fallback_heading_deg=sen.fallback_heading_deg,
+            manual_flight_azimuth_deg=sen.manual_flight_azimuth_deg,
+            camera_relative_roll_deg=sen.camera_relative_roll_deg,
+            camera_align_with_flight_heading=sen.camera_align_with_flight_heading,
+        )
+    if getattr(sen, "use_aircraft_attitude", False) and str(getattr(sen, "trajectory_mode", "")).lower() != "cross_track":
         position_vectors, up_vectors = calculate_sensor_trajectory_from_aircraft(
             look_at_point=center,
             sensor_altitude=sen.altitude_km,
@@ -1622,7 +1739,8 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             camera_roll_relative_deg=float(getattr(sen, "aircraft_camera_roll_relative_deg", 0.0)),
             n_views=len(sen.views_names),
         )
-    lookat_vectors = [center for _ in sen.views_names]
+    if lookat_vectors is None:
+        lookat_vectors = [center for _ in sen.views_names]
     for name, pos, look, up in zip(sen.views_names, position_vectors, lookat_vectors, up_vectors):
         stokes = ['I', 'Q', 'U'] if is_polarized else ['I']
         if sen.type == "perspective_projection":

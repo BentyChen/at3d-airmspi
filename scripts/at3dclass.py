@@ -6,7 +6,7 @@ Created on Thu Nov 20 13:33:43 2025
 @author: benting
 """
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 
 @dataclass
@@ -41,6 +41,7 @@ class SensorConfig:
     aircraft_camera_pitch_relative_deg: float = 0.0
     aircraft_camera_roll_relative_deg: float = 0.0
     projected_ground_xy_mode: str = "auto"  # "auto" | "as_is" | "swap"
+    cross_track: Optional[Dict[str, Any]] = None
 
 @dataclass
 class BandsConfig:

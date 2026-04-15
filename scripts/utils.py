@@ -33,14 +33,15 @@ def load_config(cfg_path: str):
 
     out = OutputConfig(**cfg["output"])
     trajectory_cfg = cfg["sensor"].get("trajectory", {})
+    sensor_views = cfg["sensor"].get("views", {})
     sen = SensorConfig(
         type=cfg["sensor"]["type"],
         altitude_km=float(cfg["sensor"]["altitude_km"]),
         fov_deg=float(cfg["sensor"]["fov_deg"]),
         resolution_km=float(cfg["sensor"]["resolution_km"]),
-        views_names=list(cfg["sensor"]["views"]["names"]),
-        views_zenith_deg=[float(v) for v in cfg["sensor"]["views"]["zenith_deg"]],
-        views_azimuth_deg=[float(v) for v in cfg["sensor"]["views"]["azimuth_deg"]],
+        views_names=list(sensor_views.get("names", [])),
+        views_zenith_deg=[float(v) for v in sensor_views.get("zenith_deg", [])],
+        views_azimuth_deg=[float(v) for v in sensor_views.get("azimuth_deg", [])],
         trajectory_mode=str(trajectory_cfg.get("mode", "auto")),
         fallback_heading_deg=float(trajectory_cfg.get("fallback_heading_deg", 0.0)),
         manual_flight_azimuth_deg=(
@@ -60,6 +61,7 @@ def load_config(cfg_path: str):
         aircraft_camera_pitch_relative_deg=float(trajectory_cfg.get("aircraft_camera_pitch_relative_deg", 0.0)),
         aircraft_camera_roll_relative_deg=float(trajectory_cfg.get("aircraft_camera_roll_relative_deg", 0.0)),
         projected_ground_xy_mode=str(trajectory_cfg.get("projected_ground_xy_mode", "auto")),
+        cross_track=trajectory_cfg.get("cross_track", None),
     )
     bnd = BandsConfig(
         wavelength_nm=[int(w) for w in cfg["bands"]["wavelength_nm"]],

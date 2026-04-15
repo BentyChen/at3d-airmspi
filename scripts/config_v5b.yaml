@@ -20,7 +20,7 @@ sensor:
     azimuth_deg: [153]     # 先调这个：控制视线主方向（会影响VAA/RAA的整体朝向）
 
   trajectory:
-    mode: "sensor_azimuth"                 # "adjacent_views"(相邻视角推断) | "sensor_azimuth"(按每个视角方位角)
+    mode: "sensor_azimuth"                 # "adjacent_views"(相邻视角推断) | "sensor_azimuth"(按每个视角方位角) | "cross_track"
     fallback_heading_deg: 0.0     # 单视角或几何退化时的默认飞行方向角(度)
     manual_flight_azimuth_deg: 0.0  # 兼容旧字段（trajectory.mode=sensor_azimuth时不再作为主开关）
     camera_relative_roll_deg: 0.6   # 相机相对飞机的滚转角(度)，默认0表示相机x/y轴与飞机参考方向对齐
@@ -35,6 +35,21 @@ sensor:
     aircraft_camera_pitch_relative_deg: 0.0
     aircraft_camera_roll_relative_deg: 0.0
     projected_ground_xy_mode: "swap"  # "auto" | "as_is" | "swap"
+    # SHDOM cross track mode parameters (used when mode: "cross_track")
+    # cross_track:
+    #   nbytes: 1
+    #   scale: 1.0
+    #   x1: 0.0
+    #   y1: 0.0
+    #   z1: 20.0
+    #   x2: 10.0
+    #   y2: 0.0
+    #   z2: 20.0
+    #   spacing: 0.5
+    #   scan1: -45.0
+    #   scan2: 45.0
+    #   delscan: 1.0
+    #   target_z_km: 0.0
 
 # camera pixel grid for perspective_projection
 camera:
