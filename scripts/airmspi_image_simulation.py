@@ -28,6 +28,7 @@ import subprocess
 import numpy as np
 import pandas as pd
 import xarray as xr
+import json
 from pathlib import Path
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -356,7 +357,11 @@ def calculate_sensor_trajectory_cross_track(
         spacing,
         scan1_deg,
         scan2_deg,
-        delscan_deg):
+        delscan_deg,
+        selected_view_indices=None,
+        lookat_ground_point=None,
+        pitch_start_deg=None,
+        pitch_end_deg=None):
     """
     SHDOM-like cross track geometry sampler.
     A sequence of camera positions is generated from (x1,y1,z1) to (x2,y2,z2),
@@ -391,43 +396,62 @@ def calculate_sensor_trajectory_cross_track(
     else:
         scan_angles = np.array([scan1_deg], dtype=float)
 
-    samples = [(pos, ang) for pos in scan_positions for ang in scan_angles]
-    if len(samples) == 0:
+    if len(scan_positions) == 0:
         raise ValueError("No valid cross track samples were generated.")
+    # NOTE:
+    # selected_view_indices should NOT subset scan_positions here.
+    # It is a higher-level "which AirMSPI views to simulate" selector and is handled
+    # in build_scene_and_sensors_single_band (cache-entry selection).
     if n_views is None:
-        selected_samples = samples
+        selected_samples = list(scan_positions)
     else:
-        if len(samples) < n_views:
-            reps = int(np.ceil(n_views / len(samples)))
-            samples = samples * reps
-        selected_samples = samples[:n_views]
+        selected_samples = list(scan_positions[:int(n_views)])
+    pitch_all = _resolve_cross_track_scan_pitch_angles(
+        n_scans=len(scan_positions),
+        pitch_start_deg=pitch_start_deg,
+        pitch_end_deg=pitch_end_deg,
+        pitch_list_deg=None,
+    )
 
     positions = []
     lookat_vectors = []
     up_vectors = []
     base_look = np.array([0.0, 0.0, -1.0], dtype=float)
     world_up = np.array([0.0, 0.0, 1.0], dtype=float)
-    for pos, ang in selected_samples:
+    for pos in selected_samples:
         # SHDOM cross-track convention:
         # scan angle sign is defined in scanner coordinates; in this NEU setup we
         # need the opposite rotation sign to keep left/right VAA ordering consistent.
-        look_dir = _rotate_vector_about_axis(base_look, along_track, -float(ang))
-        look_dir = look_dir / np.linalg.norm(look_dir)
-        lookat = np.asarray(pos, dtype=float) + look_dir
+        pos_arr = np.asarray(pos, dtype=float)
+        iscan = int(np.argmin(np.linalg.norm(scan_positions - pos_arr, axis=1)))
+        pitch_deg = float(pitch_all[iscan])
+        right_ref = np.cross(base_look, along_track)
+        right_ref = right_ref / max(np.linalg.norm(right_ref), 1e-12)
+        look_dir = _rotate_vector_about_axis(base_look, right_ref, pitch_deg)
+        center_ang = 0.5 * (float(scan1_deg) + float(scan2_deg))
+        look_dir = _rotate_vector_about_axis(look_dir, along_track, -center_ang)
+        look_dir = look_dir / max(np.linalg.norm(look_dir), 1e-12)
+        if lookat_ground_point is not None:
+            lookat = np.asarray(lookat_ground_point, dtype=float).copy()
+            lookat[2] = 0.0
+            look_dir = lookat - pos_arr
+            look_dir = look_dir / max(np.linalg.norm(look_dir), 1e-12)
+        else:
+            lookat = pos_arr + look_dir
 
         right = np.cross(look_dir, along_track)
         if np.linalg.norm(right) < 1e-12:
             right = np.cross(look_dir, world_up)
         up_vec = np.cross(right, look_dir)
         if np.linalg.norm(up_vec) < 1e-12:
-            up_vec = calculate_up_vector(np.asarray(pos, dtype=float), lookat)
+            up_vec = calculate_up_vector(pos_arr, lookat)
         else:
             up_vec = up_vec / np.linalg.norm(up_vec)
 
-        positions.append(np.asarray(pos, dtype=float))
+        positions.append(pos_arr)
         lookat_vectors.append(np.asarray(lookat, dtype=float))
         up_vectors.append(np.asarray(up_vec, dtype=float))
-    return np.asarray(positions), np.asarray(lookat_vectors), np.asarray(up_vectors)
+    return np.asarray(positions), np.asarray(lookat_vectors), np.asarray(up_vectors), scan_positions, scan_angles
 
 
 def cross_track_scan_projection(
@@ -1550,7 +1574,7 @@ def plot_simulation_results(result_path, output_dir=None, option="panel", show=F
                 plt.close(fig)
 
 
-def replot_simulation_results_with_config(result_path: str, cfg_path: str = "config_v5b.yaml",
+def replot_simulation_results_with_config(result_path: str, cfg_path: str = "config_v6a.yaml",
                                           output_dir: Optional[str] = None, show: bool = False,
                                           rebuild_if_missing: bool = True, overwrite_npz: bool = False):
     """
@@ -1569,7 +1593,7 @@ def replot_simulation_results_with_config(result_path: str, cfg_path: str = "con
 
 
 def plot_all_wavelength_results(root_dir: str,
-                                cfg_path: str = "config_v5b.yaml",
+                                cfg_path: str = "config_v6a.yaml",
                                 level: str = "registered",
                                 view_name: Optional[str] = None,
                                 show: bool = False,
@@ -2021,7 +2045,55 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
     center_NEU = center.copy()
     mode_lc = str(sen.trajectory_mode).lower()
     view_names = list(sen.views_names)
+    cached_entries = None
+    cross_track_sensor_prebuilt = False
     if mode_lc == "cross_track":
+        if sen.cross_track_cache_file and sen.cross_track_case_id:
+            try:
+                cache_path = Path(sen.cross_track_cache_file)
+                if not cache_path.is_absolute():
+                    candidates = [
+                        cache_path,
+                        Path.cwd() / cache_path,
+                        Path(__file__).resolve().parent / cache_path,
+                        Path(__file__).resolve().parent.parent / cache_path,
+                    ]
+                    resolved = None
+                    for c in candidates:
+                        if c.exists():
+                            resolved = c
+                            break
+                    if resolved is None:
+                        raise FileNotFoundError(
+                            f"cross-track cache not found. tried: {[str(c) for c in candidates]}"
+                        )
+                    cache_path = resolved
+                cache_db = json.loads(cache_path.read_text(encoding="utf-8"))
+                cached = cache_db.get(sen.cross_track_case_id)
+                if cached and len(cached) > 0:
+                    cached_entries = list(cached)
+                    selected_idx = 0
+                    if sen.cross_track_selected_view_indices:
+                        # 1-based view index in config
+                        selected_idx = max(0, int(sen.cross_track_selected_view_indices[0]) - 1)
+                    selected_idx = min(selected_idx, len(cached) - 1)
+                    c_view = cached[selected_idx]
+                    fallback_map = {
+                        "cross_track_x1": c_view["cross_track_x1"],
+                        "cross_track_y1": c_view["cross_track_y1"],
+                        "cross_track_z1": c_view["cross_track_z1"],
+                        "cross_track_x2": c_view["cross_track_x2"],
+                        "cross_track_y2": c_view["cross_track_y2"],
+                        "cross_track_z2": c_view["cross_track_z2"],
+                        "cross_track_pitch_start_deg": c_view.get("cross_track_pitch_start_deg", 0.0),
+                        "cross_track_pitch_end_deg": c_view.get("cross_track_pitch_end_deg", 0.0),
+                    }
+                    for k, v in fallback_map.items():
+                        if getattr(sen, k) is None:
+                            setattr(sen, k, float(v))
+                    print(f"📥 Loaded cross-track cache: case={sen.cross_track_case_id}, file={cache_path}, view_index={selected_idx+1}")
+            except Exception as e:
+                print(f"⚠️ Failed to load cross-track cache ({sen.cross_track_case_id}): {e}")
         required = [
             sen.cross_track_x1, sen.cross_track_y1, sen.cross_track_z1,
             sen.cross_track_x2, sen.cross_track_y2, sen.cross_track_z2
@@ -2030,28 +2102,54 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             raise ValueError(
                 "cross_track mode requires trajectory.cross_track_x1/y1/z1 and x2/y2/z2 in config."
             )
-        stokes = ['I', 'Q', 'U'] if is_polarized else ['I']
-        base_name = str(view_names[0]) if len(view_names) > 0 else "cross_track"
-        cross_sensor, scan_positions, scan_angles, scan_pitch_deg = cross_track_scan_projection(
-            wavelength=wavelength_nm/1000,
-            stokes=stokes,
-            x1=sen.cross_track_x1, y1=sen.cross_track_y1, z1=sen.cross_track_z1,
-            x2=sen.cross_track_x2, y2=sen.cross_track_y2, z2=sen.cross_track_z2,
-            spacing=sen.cross_track_spacing,
-            scan1_deg=sen.cross_track_scan1_deg,
-            scan2_deg=sen.cross_track_scan2_deg,
-            delscan_deg=sen.cross_track_delscan_deg,
-            pitch_start_deg=sen.cross_track_pitch_start_deg,
-            pitch_end_deg=sen.cross_track_pitch_end_deg,
-            pitch_list_deg=sen.cross_track_pitch_list_deg,
-        )
-        key = f"{base_name}_{int(wavelength_nm)}nm"
-        sensor_dict.add_sensor(key, cross_sensor)
-        view_names = [base_name]
+        if cached_entries is not None and sen.cross_track_selected_view_indices is not None:
+            sel = [max(1, int(i)) for i in sen.cross_track_selected_view_indices]
+            per_view = [cached_entries[i - 1] for i in sel if 1 <= i <= len(cached_entries)]
+            position_vectors, lookat_vectors, up_vectors = [], [], []
+            stokes = ['I', 'Q', 'U'] if is_polarized else ['I']
+            for e in per_view:
+                name = f"view_{int(e['view_index'])}"
+                csensor, scan_positions, scan_angles, scan_pitch_deg = cross_track_scan_projection(
+                    wavelength=wavelength_nm/1000,
+                    stokes=stokes,
+                    x1=float(e["cross_track_x1"]), y1=float(e["cross_track_y1"]), z1=float(e["cross_track_z1"]),
+                    x2=float(e["cross_track_x2"]), y2=float(e["cross_track_y2"]), z2=float(e["cross_track_z2"]),
+                    spacing=sen.cross_track_spacing,
+                    scan1_deg=sen.cross_track_scan1_deg,
+                    scan2_deg=sen.cross_track_scan2_deg,
+                    delscan_deg=sen.cross_track_delscan_deg,
+                    pitch_start_deg=float(e.get("cross_track_pitch_start_deg", 0.0)),
+                    pitch_end_deg=float(e.get("cross_track_pitch_end_deg", 0.0)),
+                )
+                key = f"{name}_{int(wavelength_nm)}nm"
+                sensor_dict.add_sensor(key, csensor)
+                # metadata-only placeholders
+                position_vectors.append(np.array([float(e["cross_track_x1"]), float(e["cross_track_y1"]), float(e["cross_track_z1"])]))
+                lookat_vectors.append(np.array([center_NEU[0], center_NEU[1], 0.0]))
+                up_vectors.append(np.array([0.0, 1.0, 0.0]))
+            position_vectors = np.asarray(position_vectors); lookat_vectors = np.asarray(lookat_vectors); up_vectors = np.asarray(up_vectors)
+            view_names = [f"view_{i}" for i in sel]
+            cross_track_sensor_prebuilt = True
+        else:
+            position_vectors, lookat_vectors, up_vectors, scan_positions, scan_angles = calculate_sensor_trajectory_cross_track(
+                n_views=len(view_names) if sen.cross_track_selected_view_indices is None else None,
+                x1=sen.cross_track_x1, y1=sen.cross_track_y1, z1=sen.cross_track_z1,
+                x2=sen.cross_track_x2, y2=sen.cross_track_y2, z2=sen.cross_track_z2,
+                spacing=sen.cross_track_spacing,
+                scan1_deg=sen.cross_track_scan1_deg,
+                scan2_deg=sen.cross_track_scan2_deg,
+                delscan_deg=sen.cross_track_delscan_deg,
+                selected_view_indices=sen.cross_track_selected_view_indices,
+                lookat_ground_point=np.array([center_NEU[0], center_NEU[1], 0.0], dtype=float),
+                pitch_start_deg=sen.cross_track_pitch_start_deg,
+                pitch_end_deg=sen.cross_track_pitch_end_deg,
+            )
+            if sen.cross_track_selected_view_indices is not None:
+                view_names = [f"view_{i}" for i in sen.cross_track_selected_view_indices]
+            elif len(view_names) != len(position_vectors):
+                view_names = [f"view_{i+1}" for i in range(len(position_vectors))]
         sen.views_names = view_names
-        position_vectors = np.array([scan_positions[0]], dtype=float)
-        lookat_vectors = np.full((1, 3), np.nan, dtype=float)
-        up_vectors = np.full((1, 3), np.nan, dtype=float)
+        scan_pitch_deg = None
     else:
         position_vectors, up_vectors = calculate_sensor_trajectory(
             sensor_zenith_list=sen.views_zenith_deg,
@@ -2076,7 +2174,7 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             )
         lookat_vectors = [center for _ in view_names]
         scan_pitch_deg = None
-    if mode_lc != "cross_track":
+    if not cross_track_sensor_prebuilt:
         for name, pos, look, up in zip(view_names, position_vectors, lookat_vectors, up_vectors):
             stokes = ['I', 'Q', 'U'] if is_polarized else ['I']
             if sen.type == "perspective_projection":
@@ -2402,7 +2500,11 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
                    cross_track_pitch_list_deg=sen.cross_track_pitch_list_deg,
                    cross_track_scan_positions=(scan_positions.tolist() if mode_lc == "cross_track" else None),
                    cross_track_scan_angles_deg=(scan_angles.tolist() if mode_lc == "cross_track" else None),
-                   cross_track_scan_pitch_deg=(scan_pitch_deg.tolist() if mode_lc == "cross_track" else None),
+                   cross_track_scan_pitch_deg=(
+                       scan_pitch_deg.tolist()
+                       if (mode_lc == "cross_track" and scan_pitch_deg is not None)
+                       else None
+                   ),
                    lat=lat_2d,
                    lon=lon_2d,
                    latlon_source=latlon_source,
@@ -2436,9 +2538,17 @@ def build_versions_single_band(sensor_dict,
     
     
     
-    first_key = list(sensor_dict.keys())[0]
-    first_image = sensor_dict.get_images(first_key)[0]
-    cam_ny, cam_nx = first_image.I.T.shape
+    cam_shapes = []
+    for _vn in sen.views_names:
+        _k = f"{_vn}_{int(wavelength_nm)}nm"
+        if _k not in sensor_dict:
+            continue
+        _img = sensor_dict.get_images(_k)[0]
+        cam_shapes.append(_img.I.T.shape)
+    if len(cam_shapes) == 0:
+        raise ValueError("No camera images found for current wavelength/views.")
+    cam_ny = int(max(s[0] for s in cam_shapes))
+    cam_nx = int(max(s[1] for s in cam_shapes))
     V = len(sen.views_names)
     I_orig = np.full((V, cam_ny, cam_nx), np.nan, dtype=np.float32)
     Q_orig = np.full_like(I_orig, np.nan); U_orig = np.full_like(I_orig, np.nan)
@@ -2690,6 +2800,9 @@ def build_versions_single_band(sensor_dict,
         #     solar_azimuth_deg=phi0
         # )
         
+        I = _fit_to_shape(I, (cam_ny, cam_nx))
+        Q = _fit_to_shape(Q, (cam_ny, cam_nx))
+        U = _fit_to_shape(U, (cam_ny, cam_nx))
         DoLP = np.sqrt(Q**2 + U**2) / np.maximum(I, 1e-12)
         I_orig[iv] = I; Q_orig[iv] = Q; U_orig[iv] = U; DoLP_orig[iv] = DoLP
         
@@ -2883,12 +2996,14 @@ def build_versions_single_band(sensor_dict,
         # U_gd   = utils.downsample_block(U_g, dsm.factor, dsm.method)
         # DoLP_gd = np.sqrt(Q_gd**2 + U_gd**2) / np.maximum(I_gd, 1e-12)
         # I_reg_ds[iv] = I_gd; Q_reg_ds[iv] = Q_gd; U_reg_ds[iv] = U_gd; DoLP_reg_ds[iv] = DoLP_gd
-        thetav_o[iv][:] = sen.views_zenith_deg[iv]
+        vz_scalar = float(sen.views_zenith_deg[iv]) if iv < len(sen.views_zenith_deg) else float(sen.views_zenith_deg[0] if len(sen.views_zenith_deg) > 0 else np.nan)
+        va_scalar = float(sen.views_azimuth_deg[iv]) if iv < len(sen.views_azimuth_deg) else float(sen.views_azimuth_deg[0] if len(sen.views_azimuth_deg) > 0 else np.nan)
+        thetav_o[iv][:] = vz_scalar
         theta0_o[iv][:] = context.get("theta_0", 180 - 35)
-        faipfai0_o[iv][:] = sen.views_azimuth_deg[iv] - (context.get("solar_azimuth", 325.0 - 360))
-        thetav_r[iv][:] = sen.views_zenith_deg[iv]
+        faipfai0_o[iv][:] = va_scalar - (context.get("solar_azimuth", 325.0 - 360))
+        thetav_r[iv][:] = vz_scalar
         theta0_r[iv][:] = context.get("theta_0", 180 - 35)
-        faipfai0_r[iv][:] = sen.views_azimuth_deg[iv] - (context.get("solar_azimuth", 325.0 - 360))
+        faipfai0_r[iv][:] = va_scalar - (context.get("solar_azimuth", 325.0 - 360))
         elevation_o = np.full_like(I_brf, 0, dtype=np.float32)
         Land_water_mask_o = np.full_like(I_brf, 1, dtype=np.float32)
         elevation_r = np.full_like(I_brf_g, 0, dtype=np.float32)
@@ -3070,7 +3185,7 @@ def _record_experiment_snapshot(cfg_path: str, cfg: Dict[str, Any], out_root: st
 #%% Section 6: Main (per-wavelength)
 # =============================
 
-def main(cfg_path: str = "config_v5b.yaml", only_band: Optional[int] = None,
+def main(cfg_path: str = "config_v6a.yaml", only_band: Optional[int] = None,
          n_jobs: Optional[int] = None, overwrite: bool = False, clean_after_band: bool = True,
          precheck_only: bool = False):
     (cfg, out_cfg, sen_cfg, bnd_cfg, dsm_cfg, svr_cfg, plt_cfg, grd_cfg, comp_cfg, crop_cfg,
@@ -3240,6 +3355,43 @@ def main(cfg_path: str = "config_v5b.yaml", only_band: Optional[int] = None,
         dur = time.time() - start_t
         print(f"⏱️  {int(w)} nm done in {dur/60:.2f} min")
     print("\n✅ All requested wavelengths processed.")
+    if out_cfg.save_nc and not precheck_only:
+        try:
+            band_list = [int(w) for w, _ in bands]
+            ds_first = xr.open_dataset(os.path.join(out_cfg.root_dir, f"AirMSPI_{band_list[0]}nm.nc"))
+            V = int(ds_first.sizes["view"]); Y = int(ds_first.sizes["y_gds"]); X = int(ds_first.sizes["x_gds"]); B = len(band_list)
+            shp = (Y, X, V, B)
+            I = np.full(shp, np.nan); Q = np.full(shp, np.nan); U = np.full(shp, np.nan)
+            DoLP = np.full(shp, np.nan); thetav = np.full(shp, np.nan); theta0 = np.full(shp, np.nan); faipfai0 = np.full(shp, np.nan)
+            for ib, w in enumerate(band_list):
+                d = xr.open_dataset(os.path.join(out_cfg.root_dir, f"AirMSPI_{w}nm.nc"))
+                I[..., ib] = np.transpose(d["I_downsampled_registered"].values, (1, 2, 0))
+                Q[..., ib] = np.transpose(d["Q_downsampled_registered"].values, (1, 2, 0))
+                U[..., ib] = np.transpose(d["U_downsampled_registered"].values, (1, 2, 0))
+                DoLP[..., ib] = np.transpose(d["DoLP_downsampled_registered"].values, (1, 2, 0))
+                thetav[..., ib] = np.transpose(d["VZA_downsampled_registered"].values, (1, 2, 0))
+                theta0[..., ib] = np.transpose(np.broadcast_to(float(d["theta_0"].values), (V, Y, X)), (1, 2, 0))
+                faipfai0[..., ib] = np.transpose(d["RAA_downsampled_registered"].values, (1, 2, 0))
+            out = xr.Dataset(
+                data_vars=dict(
+                    I=(["x", "y", "view", "band"], I), Q=(["x", "y", "view", "band"], Q), U=(["x", "y", "view", "band"], U),
+                    DoLP=(["x", "y", "view", "band"], DoLP), thetav=(["x", "y", "view", "band"], thetav),
+                    theta0=(["x", "y", "view", "band"], theta0), faipfai0=(["x", "y", "view", "band"], faipfai0),
+                    ErrI=(["x", "y", "view", "band"], np.full(shp, np.nan)), ErrQ=(["x", "y", "view", "band"], np.full(shp, np.nan)),
+                    ErrU=(["x", "y", "view", "band"], np.full(shp, np.nan)), ErrDoLP=(["x", "y", "view", "band"], np.full(shp, np.nan)),
+                    lat=(["x", "y"], ds_first["lat"].values), lon=(["x", "y"], ds_first["lon"].values),
+                    elevation=(["x", "y"], ds_first["elevation"].values), Land_water_mask=(["x", "y"], ds_first["Land_water_mask"].values),
+                    datalat=(["x_full", "y_full"], ds_first["datalat"].values), datalon=(["x_full", "y_full"], ds_first["datalon"].values),
+                    dataElevation=(["x_full", "y_full"], ds_first["dataElevation"].values),
+                    dataLand_water_mask=(["x_full", "y_full"], ds_first["dataLand_water_mask"].values),
+                    Band_AirMSPI=(["band", "one"], np.asarray(band_list, dtype=float).reshape(-1, 1)),
+                    Height_AirMSPI=(["one", "one2"], np.array([[float(sen_cfg.altitude_km)]], dtype=float)),
+                )
+            )
+            out.to_netcdf(os.path.join(out_cfg.root_dir, "AirMSPI_multiview_multiband.nc"))
+            print("📦 Saved AirMSPI_multiview_multiband.nc")
+        except Exception as e:
+            print(f"⚠️ Failed to merge multiview/multiband nc: {e}")
     if out_cfg.save_nc:
         if len(spectral_AOD_all) == 0:
             print("⚠️ Skip spectral_AOD_SSA.nc: no AOD/SSA data collected (all bands skipped or precheck_only mode).")
@@ -3268,8 +3420,8 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Per-wavelength AT3D simulation pipeline (v5b)")
-    parser.add_argument("--config", type=str, default="config_v5b.yaml", help="Path to config file")
+    parser = argparse.ArgumentParser(description="Per-wavelength AT3D simulation pipeline (v6a)")
+    parser.add_argument("--config", type=str, default="config_v6a.yaml", help="Path to config file")
     parser.add_argument("--band", type=int, default=None, help="Run only this wavelength (nm)")
     parser.add_argument("--n_jobs", type=int, default=None, help="Number of parallel jobs (overrides config)")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing NetCDF files")
