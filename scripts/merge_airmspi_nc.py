@@ -98,11 +98,11 @@ def main(config: str = 'config_v6a.yaml', factor: int = 25, output: str | None =
         theta0[..., ib] = theta0_val
         dataI[:, ib, :, :] = ds['I_original'].values[view_idx, :, :]
 
-    # 25x25 from full-res dims
-    lat = _downsample_mean2d(datalat, factor)
-    lon = _downsample_mean2d(datalon, factor)
-    elevation = _downsample_mean2d(dataElevation, factor)
-    land = _downsample_mean2d(dataLandWater, factor)
+    # keep downsampled geo fields aligned with registered-downsample grid (y_gds, x_gds)
+    lat = np.full((ny_ds, nx_ds), np.nan, dtype=np.float64)
+    lon = np.full((ny_ds, nx_ds), np.nan, dtype=np.float64)
+    elevation = np.zeros((ny_ds, nx_ds), dtype=np.float64)
+    land = np.ones((ny_ds, nx_ds), dtype=np.float64)
 
     ErrI = np.zeros_like(I)
     ErrQ = np.zeros_like(I)
