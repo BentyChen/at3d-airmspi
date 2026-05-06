@@ -62,6 +62,36 @@ def _to_numpy2d(ds: xr.Dataset, varname: str) -> np.ndarray:
 
 
 
+
+
+def _extract_geo_fields(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Preferred geophysical fields
+    if any(k in ds for k in ["datalat", "latitude", "lat"]) and any(k in ds for k in ["datalon", "longitude", "lon"]):
+        lat_name = _choose_first(ds, ["datalat", "latitude", "lat"])
+        lon_name = _choose_first(ds, ["datalon", "longitude", "lon"])
+        elev_name = _choose_first(ds, ["dataElevation", "elevation"]) if ("dataElevation" in ds or "elevation" in ds) else None
+        lwm_name = _choose_first(ds, ["dataLand_water_mask", "Land_water_mask", "land_water_mask"]) if ("dataLand_water_mask" in ds or "Land_water_mask" in ds or "land_water_mask" in ds) else None
+
+        datalat = _to_numpy2d(ds, lat_name)
+        datalon = _to_numpy2d(ds, lon_name)
+        data_elev = _to_numpy2d(ds, elev_name) if elev_name else np.zeros_like(datalat)
+        data_lwm = _to_numpy2d(ds, lwm_name) if lwm_name else np.zeros_like(datalat)
+        return datalat, datalon, data_elev, data_lwm
+
+    # Fallback for simulation outputs without lat/lon variables: use grid coordinates
+    y_name = "y_gds" if "y_gds" in ds.coords else ("y_g" if "y_g" in ds.coords else None)
+    x_name = "x_gds" if "x_gds" in ds.coords else ("x_g" if "x_g" in ds.coords else None)
+    if y_name is None or x_name is None:
+        raise KeyError("No geolocation variables (lat/lon) or grid coordinates (x_gds/y_gds) found.")
+    y = np.asarray(ds[y_name].values, dtype=np.float64)
+    x = np.asarray(ds[x_name].values, dtype=np.float64)
+    xx, yy = np.meshgrid(x, y)
+    datalat = yy
+    datalon = xx
+    data_elev = np.zeros_like(datalat)
+    data_lwm = np.zeros_like(datalat)
+    return datalat, datalon, data_elev, data_lwm
+
 def _load_merge_config(cfg_path: str) -> tuple[Path, list[int], list[int], int]:
     cfg_file = Path(cfg_path)
     if not cfg_file.is_absolute():
@@ -92,10 +122,7 @@ def _looks_like_airmspi_file(path: Path) -> bool:
             vars_set = set(ds.variables)
             merged_style = {"I", "Q", "U", "DoLP", "theta0", "thetav", "faipfai0"}
             single_band_style = {"I_downsampled_registered", "Q_downsampled_registered", "U_downsampled_registered", "DoLP_downsampled_registered", "VZA_downsampled_registered", "RAA_downsampled_registered"}
-            lat_candidates = {"datalat", "latitude", "lat"}
-            lon_candidates = {"datalon", "longitude", "lon"}
-            has_geo = bool(vars_set & lat_candidates) and bool(vars_set & lon_candidates)
-            return has_geo and (merged_style.issubset(vars_set) or single_band_style.issubset(vars_set))
+            return merged_style.issubset(vars_set) or single_band_style.issubset(vars_set)
     except Exception:
         return False
 
@@ -144,15 +171,7 @@ def main(config: str = DEFAULT_CONFIG, inputs: list[str] | None = None, output: 
 
     opened = [xr.open_dataset(f) for f in input_files]
 
-    lat_name = _choose_first(opened[0], ["datalat", "latitude", "lat"])
-    lon_name = _choose_first(opened[0], ["datalon", "longitude", "lon"])
-    elev_name = _choose_first(opened[0], ["dataElevation", "elevation"])
-    lwm_name = _choose_first(opened[0], ["dataLand_water_mask", "Land_water_mask", "land_water_mask"])
-
-    datalat = _to_numpy2d(opened[0], lat_name)
-    datalon = _to_numpy2d(opened[0], lon_name)
-    data_elev = _to_numpy2d(opened[0], elev_name)
-    data_lwm = _to_numpy2d(opened[0], lwm_name)
+    datalat, datalon, data_elev, data_lwm = _extract_geo_fields(opened[0])
 
     lat_ds = _downsample_mean2d(datalat, ds_factor)
     lon_ds = _downsample_mean2d(datalon, ds_factor)
