@@ -86,13 +86,16 @@ def _inputs_from_config(root_dir: Path, bands: list[int]) -> list[Path]:
     return []
 
 def _looks_like_airmspi_file(path: Path) -> bool:
-    required_core = {"I", "Q", "U", "DoLP", "ErrI", "ErrQ", "ErrU", "ErrDoLP", "theta0", "thetav", "faipfai0"}
-    lat_candidates = {"datalat", "latitude", "lat"}
-    lon_candidates = {"datalon", "longitude", "lon"}
+    """Accept either merged-style or single-band generated AirMSPI files."""
     try:
         with xr.open_dataset(path) as ds:
             vars_set = set(ds.variables)
-            return required_core.issubset(vars_set) and bool(vars_set & lat_candidates) and bool(vars_set & lon_candidates)
+            merged_style = {"I", "Q", "U", "DoLP", "theta0", "thetav", "faipfai0"}
+            single_band_style = {"I_downsampled_registered", "Q_downsampled_registered", "U_downsampled_registered", "DoLP_downsampled_registered", "VZA_downsampled_registered", "RAA_downsampled_registered"}
+            lat_candidates = {"datalat", "latitude", "lat"}
+            lon_candidates = {"datalon", "longitude", "lon"}
+            has_geo = bool(vars_set & lat_candidates) and bool(vars_set & lon_candidates)
+            return has_geo and (merged_style.issubset(vars_set) or single_band_style.issubset(vars_set))
     except Exception:
         return False
 
@@ -159,17 +162,17 @@ def main(config: str = DEFAULT_CONFIG, inputs: list[str] | None = None, output: 
     stack = []
     bands_ref = None
     for ds in opened:
-        i_name = _choose_first(ds, ["I"])
-        q_name = _choose_first(ds, ["Q"])
-        u_name = _choose_first(ds, ["U"])
-        dolp_name = _choose_first(ds, ["DoLP"])
-        erri_name = _choose_first(ds, ["ErrI"])
-        errq_name = _choose_first(ds, ["ErrQ"])
-        erru_name = _choose_first(ds, ["ErrU"])
-        errdolp_name = _choose_first(ds, ["ErrDoLP"])
-        theta0_name = _choose_first(ds, ["theta0"])
-        thetav_name = _choose_first(ds, ["thetav"])
-        faipfai0_name = _choose_first(ds, ["faipfai0"])
+        i_name = _choose_first(ds, ["I", "I_downsampled_registered"])
+        q_name = _choose_first(ds, ["Q", "Q_downsampled_registered"])
+        u_name = _choose_first(ds, ["U", "U_downsampled_registered"])
+        dolp_name = _choose_first(ds, ["DoLP", "DoLP_downsampled_registered"])
+        erri_name = _choose_first(ds, ["ErrI"]) if "ErrI" in ds else None
+        errq_name = _choose_first(ds, ["ErrQ"]) if "ErrQ" in ds else None
+        erru_name = _choose_first(ds, ["ErrU"]) if "ErrU" in ds else None
+        errdolp_name = _choose_first(ds, ["ErrDoLP"]) if "ErrDoLP" in ds else None
+        theta0_name = _choose_first(ds, ["theta0", "theta_0"])
+        thetav_name = _choose_first(ds, ["thetav", "VZA_downsampled_registered"])
+        faipfai0_name = _choose_first(ds, ["faipfai0", "RAA_downsampled_registered"])
 
         band_name = "band" if "band" in ds.dims else ("dim_band" if "dim_band" in ds.dims else None)
         if band_name is None:
@@ -189,10 +192,10 @@ def main(config: str = DEFAULT_CONFIG, inputs: list[str] | None = None, output: 
                 Q=np.asarray(ds[q_name].values, dtype=np.float64),
                 U=np.asarray(ds[u_name].values, dtype=np.float64),
                 DoLP=np.asarray(ds[dolp_name].values, dtype=np.float64),
-                ErrI=np.asarray(ds[erri_name].values, dtype=np.float64),
-                ErrQ=np.asarray(ds[errq_name].values, dtype=np.float64),
-                ErrU=np.asarray(ds[erru_name].values, dtype=np.float64),
-                ErrDoLP=np.asarray(ds[errdolp_name].values, dtype=np.float64),
+                ErrI=np.asarray(ds[erri_name].values, dtype=np.float64) if erri_name else np.full_like(np.asarray(ds[i_name].values, dtype=np.float64), np.nan),
+                ErrQ=np.asarray(ds[errq_name].values, dtype=np.float64) if errq_name else np.full_like(np.asarray(ds[i_name].values, dtype=np.float64), np.nan),
+                ErrU=np.asarray(ds[erru_name].values, dtype=np.float64) if erru_name else np.full_like(np.asarray(ds[i_name].values, dtype=np.float64), np.nan),
+                ErrDoLP=np.asarray(ds[errdolp_name].values, dtype=np.float64) if errdolp_name else np.full_like(np.asarray(ds[i_name].values, dtype=np.float64), np.nan),
                 theta0=np.asarray(ds[theta0_name].values, dtype=np.float64),
                 thetav=np.asarray(ds[thetav_name].values, dtype=np.float64),
                 faipfai0=np.asarray(ds[faipfai0_name].values, dtype=np.float64),
