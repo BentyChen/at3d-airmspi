@@ -17,11 +17,13 @@ from typing import Iterable
 
 import numpy as np
 import xarray as xr
+import yaml
 
 # Spyder/IDE-friendly defaults (used when no CLI args are provided)
+DEFAULT_CONFIG = "config_v6a.yaml"
 DEFAULT_INPUTS: list[str] = []  # Optional explicit input file list for Spyder run
 DEFAULT_INPUT_GLOB = "*.nc"
-DEFAULT_OUTPUT = "merged_airmspi.nc"
+DEFAULT_OUTPUT = "AirMSPI_multiview_multiband.nc"
 DEFAULT_FACTOR = 25
 
 
@@ -58,6 +60,31 @@ def _to_numpy2d(ds: xr.Dataset, varname: str) -> np.ndarray:
 
 
 
+
+
+def _load_merge_config(cfg_path: str) -> tuple[Path, list[int], list[int], int]:
+    cfg_file = Path(cfg_path)
+    if not cfg_file.is_absolute():
+        cfg_file = Path(__file__).resolve().parent / cfg_file
+    with open(cfg_file, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    root_dir = Path(cfg["output"]["root_dir"])
+    if not root_dir.is_absolute():
+        root_dir = (cfg_file.parent / root_dir).resolve()
+
+    view_indices = cfg.get("sensor", {}).get("trajectory", {}).get("cross_track_selected_view_indices", []) or []
+    bands = [int(w) for w in cfg.get("bands", {}).get("wavelength_nm", [])]
+    factor = int(cfg.get("downsample", {}).get("factor", DEFAULT_FACTOR))
+    return root_dir, [int(v) for v in view_indices], bands, factor
+
+
+def _inputs_from_config(root_dir: Path, bands: list[int]) -> list[Path]:
+    if bands:
+        files = [root_dir / f"AirMSPI_{int(w)}nm.nc" for w in bands]
+        return [f for f in files if f.exists()]
+    return []
+
 def _looks_like_airmspi_file(path: Path) -> bool:
     required_core = {"I", "Q", "U", "DoLP", "ErrI", "ErrQ", "ErrU", "ErrDoLP", "theta0", "thetav", "faipfai0"}
     lat_candidates = {"datalat", "latitude", "lat"}
@@ -74,39 +101,44 @@ def _resolve_args(argv: list[str] | None = None) -> argparse.Namespace | None:
     p.add_argument("--inputs", nargs="+", help="Input NetCDF files (per-view/per-band or mixed)")
     p.add_argument("--output", help="Output merged NetCDF file")
     p.add_argument("--factor", type=int, default=DEFAULT_FACTOR, help=f"Downsampling factor (default: {DEFAULT_FACTOR})")
+    p.add_argument("--config", default=DEFAULT_CONFIG, help="Config YAML (default: config_v6a.yaml)")
     args = p.parse_args(argv)
 
     if args.inputs and args.output:
+        args.selected_view_indices = []
         return args
 
-    # IDE/Spyder direct run: no CLI args
-    cwd = Path.cwd()
+    # IDE/Spyder direct run: prefer config_v6a parameters
+    root_dir, view_indices, cfg_bands, cfg_factor = _load_merge_config(args.config)
+
     if DEFAULT_INPUTS:
         auto_inputs = [Path(i) for i in DEFAULT_INPUTS]
     else:
-        auto_inputs = sorted(cwd.glob(DEFAULT_INPUT_GLOB))
+        auto_inputs = _inputs_from_config(root_dir, cfg_bands)
         if not auto_inputs:
-            # fallback: search repository root recursively for convenience
-            repo_root = Path(__file__).resolve().parents[1]
-            auto_inputs = sorted(repo_root.rglob(DEFAULT_INPUT_GLOB))
+            auto_inputs = sorted(root_dir.glob(DEFAULT_INPUT_GLOB))
 
     auto_inputs = [p for p in auto_inputs if _looks_like_airmspi_file(p)]
 
     if not auto_inputs:
-        print("[WARN] Found no AirMSPI-like input NetCDF files.")
+        print("[WARN] Found no AirMSPI-like input NetCDF files in config root_dir:", root_dir)
         print("       Option A: set DEFAULT_INPUTS at top of this script.")
         print("       Option B: run with --inputs ... --output ...")
         return None
 
     args.inputs = [str(p) for p in auto_inputs]
-    args.output = str(cwd / DEFAULT_OUTPUT)
+    args.output = str(root_dir / DEFAULT_OUTPUT)
+    args.selected_view_indices = view_indices
     if "--factor" not in (argv or sys.argv[1:]):
-        args.factor = DEFAULT_FACTOR
+        args.factor = cfg_factor
 
     print("[INFO] No --inputs/--output provided; using Spyder auto mode:")
-    print(f"       inputs={len(args.inputs)} files from {cwd}")
+    print(f"       config={args.config}")
+    print(f"       root_dir={root_dir}")
+    print(f"       inputs={len(args.inputs)} files")
     print(f"       output={args.output}")
     print(f"       factor={args.factor}")
+    print(f"       selected_view_indices={args.selected_view_indices}")
     return args
 
 
@@ -186,6 +218,9 @@ def main(argv: list[str] | None = None) -> None:
     nx_ds, ny_ds = lat_ds.shape
     nview = len(stack)
     nband = merged["I"].shape[-1]
+    expected_views = len(getattr(args, "selected_view_indices", []) or [])
+    if expected_views and nview != expected_views:
+        print(f"[WARN] config selected views={expected_views}, but merged files={nview}.")
 
     out = xr.Dataset(
         data_vars={
