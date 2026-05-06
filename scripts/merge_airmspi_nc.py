@@ -96,60 +96,39 @@ def _looks_like_airmspi_file(path: Path) -> bool:
     except Exception:
         return False
 
-def _resolve_args(argv: list[str] | None = None) -> argparse.Namespace | None:
-    p = argparse.ArgumentParser()
-    p.add_argument("--inputs", nargs="+", help="Input NetCDF files (per-view/per-band or mixed)")
-    p.add_argument("--output", help="Output merged NetCDF file")
-    p.add_argument("--factor", type=int, default=DEFAULT_FACTOR, help=f"Downsampling factor (default: {DEFAULT_FACTOR})")
-    p.add_argument("--config", default=DEFAULT_CONFIG, help="Config YAML (default: config_v6a.yaml)")
-    args = p.parse_args(argv)
-
-    if args.inputs and args.output:
-        args.selected_view_indices = []
-        return args
-
-    # IDE/Spyder direct run: prefer config_v6a parameters
-    root_dir, view_indices, cfg_bands, cfg_factor = _load_merge_config(args.config)
-
-    if DEFAULT_INPUTS:
-        auto_inputs = [Path(i) for i in DEFAULT_INPUTS]
-    else:
-        auto_inputs = _inputs_from_config(root_dir, cfg_bands)
-        if not auto_inputs:
-            auto_inputs = sorted(root_dir.glob(DEFAULT_INPUT_GLOB))
-
-    auto_inputs = [p for p in auto_inputs if _looks_like_airmspi_file(p)]
-
-    if not auto_inputs:
-        print("[WARN] Found no AirMSPI-like input NetCDF files in config root_dir:", root_dir)
-        print("       Option A: set DEFAULT_INPUTS at top of this script.")
-        print("       Option B: run with --inputs ... --output ...")
-        return None
-
-    args.inputs = [str(p) for p in auto_inputs]
-    args.output = str(root_dir / DEFAULT_OUTPUT)
-    args.selected_view_indices = view_indices
-    if "--factor" not in (argv or sys.argv[1:]):
-        args.factor = cfg_factor
-
-    print("[INFO] No --inputs/--output provided; using Spyder auto mode:")
-    print(f"       config={args.config}")
-    print(f"       root_dir={root_dir}")
-    print(f"       inputs={len(args.inputs)} files")
-    print(f"       output={args.output}")
-    print(f"       factor={args.factor}")
-    print(f"       selected_view_indices={args.selected_view_indices}")
-    return args
+def _resolve_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Merge AirMSPI NetCDF files using config_v6a settings")
+    parser.add_argument("--config", type=str, default=DEFAULT_CONFIG, help="Path to config file")
+    parser.add_argument("--inputs", nargs="+", help="Optional explicit input NetCDF file list")
+    parser.add_argument("--output", type=str, help="Optional explicit output NetCDF file path")
+    parser.add_argument("--factor", type=int, help="Optional downsampling factor override")
+    return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = _resolve_args(argv)
-    if args is None:
-        return
-
-    input_files = [Path(i) for i in args.inputs]
+def _resolve_inputs_from_config(config: str) -> tuple[list[Path], Path, list[int], int]:
+    root_dir, view_indices, bands, factor = _load_merge_config(config)
+    input_files = _inputs_from_config(root_dir, bands)
     if not input_files:
-        raise ValueError("No input files provided")
+        input_files = sorted(root_dir.glob(DEFAULT_INPUT_GLOB))
+    input_files = [p for p in input_files if _looks_like_airmspi_file(p)]
+    output_path = root_dir / DEFAULT_OUTPUT
+    return input_files, output_path, view_indices, factor
+
+
+def main(config: str = DEFAULT_CONFIG, inputs: list[str] | None = None, output: str | None = None, factor: int | None = None) -> None:
+    if inputs:
+        input_files = [Path(i) for i in inputs]
+        selected_view_indices: list[int] = []
+        output_path = Path(output) if output else Path(DEFAULT_OUTPUT)
+        ds_factor = factor if factor is not None else DEFAULT_FACTOR
+    else:
+        auto_inputs, auto_output, selected_view_indices, cfg_factor = _resolve_inputs_from_config(config)
+        if not auto_inputs:
+            raise FileNotFoundError(f"No AirMSPI-like input NetCDF files found from config: {config}")
+        input_files = auto_inputs
+        output_path = Path(output) if output else auto_output
+        ds_factor = factor if factor is not None else cfg_factor
+
 
     opened = [xr.open_dataset(f) for f in input_files]
 
@@ -163,10 +142,10 @@ def main(argv: list[str] | None = None) -> None:
     data_elev = _to_numpy2d(opened[0], elev_name)
     data_lwm = _to_numpy2d(opened[0], lwm_name)
 
-    lat_ds = _downsample_mean2d(datalat, args.factor)
-    lon_ds = _downsample_mean2d(datalon, args.factor)
-    elev_ds = _downsample_mean2d(data_elev, args.factor)
-    lwm_ds = _downsample_mean2d(data_lwm, args.factor)
+    lat_ds = _downsample_mean2d(datalat, ds_factor)
+    lon_ds = _downsample_mean2d(datalon, ds_factor)
+    elev_ds = _downsample_mean2d(data_elev, ds_factor)
+    lwm_ds = _downsample_mean2d(data_lwm, ds_factor)
 
     stack = []
     bands_ref = None
@@ -218,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     nx_ds, ny_ds = lat_ds.shape
     nview = len(stack)
     nband = merged["I"].shape[-1]
-    expected_views = len(getattr(args, "selected_view_indices", []) or [])
+    expected_views = len(selected_view_indices or [])
     if expected_views and nview != expected_views:
         print(f"[WARN] config selected views={expected_views}, but merged files={nview}.")
 
@@ -259,14 +238,15 @@ def main(argv: list[str] | None = None) -> None:
         },
     )
 
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    out.to_netcdf(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_netcdf(output_path)
     for ds in opened:
         ds.close()
-    print(f"Saved merged file: {args.output}")
+    print(f"Saved merged file: {output_path}")
     print(f"dims: dim_x={datalat.shape[0]}, dim_y={datalat.shape[1]}, "
           f"dim_x_downsampling={nx_ds}, dim_y_downsampling={ny_ds}, dim_view={nview}, dim_band={nband}")
 
 
 if __name__ == "__main__":
-    main()
+    args = _resolve_args()
+    main(config=args.config, inputs=args.inputs, output=args.output, factor=args.factor)
