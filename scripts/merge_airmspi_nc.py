@@ -11,11 +11,17 @@ Output variables and dimensions are aligned with retrieval-style products:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 import xarray as xr
+
+# Spyder/IDE-friendly defaults (used when no CLI args are provided)
+DEFAULT_INPUT_GLOB = "*.nc"
+DEFAULT_OUTPUT = "merged_airmspi.nc"
+DEFAULT_FACTOR = 25
 
 
 def _crop_to_factor(a: np.ndarray, factor: int) -> np.ndarray:
@@ -49,12 +55,39 @@ def _to_numpy2d(ds: xr.Dataset, varname: str) -> np.ndarray:
     return np.asarray(arr, dtype=np.float64)
 
 
-def main() -> None:
+def _resolve_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--inputs", nargs="+", required=True, help="Input NetCDF files (per-view/per-band or mixed)")
-    p.add_argument("--output", required=True, help="Output merged NetCDF file")
-    p.add_argument("--factor", type=int, default=25, help="Downsampling factor (default: 25)")
-    args = p.parse_args()
+    p.add_argument("--inputs", nargs="+", help="Input NetCDF files (per-view/per-band or mixed)")
+    p.add_argument("--output", help="Output merged NetCDF file")
+    p.add_argument("--factor", type=int, default=DEFAULT_FACTOR, help=f"Downsampling factor (default: {DEFAULT_FACTOR})")
+    args = p.parse_args(argv)
+
+    if args.inputs and args.output:
+        return args
+
+    # IDE/Spyder direct run: no CLI args, auto-discover inputs in current working directory
+    cwd = Path.cwd()
+    auto_inputs = sorted(cwd.glob(DEFAULT_INPUT_GLOB))
+    if not auto_inputs:
+        raise ValueError(
+            "No command-line arguments provided and no NetCDF files found in current folder. "
+            "Run with --inputs/--output or place input .nc files in the working directory."
+        )
+
+    args.inputs = [str(p) for p in auto_inputs]
+    args.output = str(cwd / DEFAULT_OUTPUT)
+    if "--factor" not in (argv or sys.argv[1:]):
+        args.factor = DEFAULT_FACTOR
+
+    print("[INFO] No --inputs/--output provided; using Spyder auto mode:")
+    print(f"       inputs={len(args.inputs)} files from {cwd}")
+    print(f"       output={args.output}")
+    print(f"       factor={args.factor}")
+    return args
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _resolve_args(argv)
 
     input_files = [Path(i) for i in args.inputs]
     if not input_files:
