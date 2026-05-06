@@ -30,6 +30,29 @@ def _downsample_mean2d(a: np.ndarray, factor: int) -> np.ndarray:
     return np.nanmean(c.reshape(ny2 // factor, factor, nx2 // factor, factor), axis=(1, 3))
 
 
+
+
+def _resolve_view_indices(ds: xr.Dataset, selected_views: list[int]) -> list[int]:
+    nview_all = int(ds.sizes['view'])
+    if not selected_views:
+        return list(range(nview_all))
+
+    # If file already contains only selected views (common case), keep all
+    if max(selected_views) >= nview_all:
+        # try matching by view labels like "view_1", "view_3"
+        if 'view' in ds.coords:
+            labels = [str(v) for v in ds['view'].values]
+            mapped = []
+            for v in selected_views:
+                key = f'view_{v}'
+                if key in labels:
+                    mapped.append(labels.index(key))
+            if mapped:
+                return mapped
+        return list(range(nview_all))
+
+    return [v - 1 for v in selected_views]
+
 def main(config: str = 'config_v6a.yaml', factor: int = 25, output: str | None = None):
     root_dir, bands, selected_views = _load_cfg(config)
     files = [root_dir / f'AirMSPI_{b}nm.nc' for b in bands]
@@ -51,8 +74,7 @@ def main(config: str = 'config_v6a.yaml', factor: int = 25, output: str | None =
     # downsampled registered grid
     ny_ds = int(d0.sizes['y_gds'])
     nx_ds = int(d0.sizes['x_gds'])
-    nview_all = int(d0.sizes['view'])
-    view_idx = [v - 1 for v in selected_views] if selected_views else list(range(nview_all))
+    view_idx = _resolve_view_indices(d0, selected_views)
     nview = len(view_idx)
     nband = len(bands)
 
