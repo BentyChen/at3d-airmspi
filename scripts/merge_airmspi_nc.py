@@ -116,19 +116,28 @@ def _resolve_inputs_from_config(config: str) -> tuple[list[Path], Path, list[int
 
 
 def main(config: str = DEFAULT_CONFIG, inputs: list[str] | None = None, output: str | None = None, factor: int | None = None) -> None:
+    root_dir, selected_view_indices, cfg_bands, cfg_factor = _load_merge_config(config)
+
     if inputs:
         input_files = [Path(i) for i in inputs]
-        selected_view_indices: list[int] = []
-        output_path = Path(output) if output else Path(DEFAULT_OUTPUT)
-        ds_factor = factor if factor is not None else DEFAULT_FACTOR
     else:
-        auto_inputs, auto_output, selected_view_indices, cfg_factor = _resolve_inputs_from_config(config)
+        auto_inputs, auto_output, _, _ = _resolve_inputs_from_config(config)
         if not auto_inputs:
             raise FileNotFoundError(f"No AirMSPI-like input NetCDF files found from config: {config}")
         input_files = auto_inputs
-        output_path = Path(output) if output else auto_output
-        ds_factor = factor if factor is not None else cfg_factor
 
+    # Enforce cross_track_selected_view_indices if files are view-ordered
+    if selected_view_indices and len(input_files) >= max(selected_view_indices):
+        input_files = [input_files[i - 1] for i in selected_view_indices]
+
+    output_path = Path(output) if output else (root_dir / DEFAULT_OUTPUT)
+    ds_factor = factor if factor is not None else cfg_factor
+
+    print(f"[INFO] config={config}")
+    print(f"[INFO] root_dir={root_dir}")
+    print(f"[INFO] cross_track_selected_view_indices={selected_view_indices}")
+    print(f"[INFO] bands={cfg_bands}")
+    print(f"[INFO] downsample.factor={ds_factor}")
 
     opened = [xr.open_dataset(f) for f in input_files]
 
@@ -197,6 +206,8 @@ def main(config: str = DEFAULT_CONFIG, inputs: list[str] | None = None, output: 
     nx_ds, ny_ds = lat_ds.shape
     nview = len(stack)
     nband = merged["I"].shape[-1]
+    if cfg_bands:
+        bands_ref = np.asarray(cfg_bands, dtype=np.float64)
     expected_views = len(selected_view_indices or [])
     if expected_views and nview != expected_views:
         print(f"[WARN] config selected views={expected_views}, but merged files={nview}.")
