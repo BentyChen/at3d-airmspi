@@ -19,6 +19,7 @@ import numpy as np
 import xarray as xr
 
 # Spyder/IDE-friendly defaults (used when no CLI args are provided)
+DEFAULT_INPUTS: list[str] = []  # Optional explicit input file list for Spyder run
 DEFAULT_INPUT_GLOB = "*.nc"
 DEFAULT_OUTPUT = "merged_airmspi.nc"
 DEFAULT_FACTOR = 25
@@ -55,7 +56,20 @@ def _to_numpy2d(ds: xr.Dataset, varname: str) -> np.ndarray:
     return np.asarray(arr, dtype=np.float64)
 
 
-def _resolve_args(argv: list[str] | None = None) -> argparse.Namespace:
+
+
+def _looks_like_airmspi_file(path: Path) -> bool:
+    required_core = {"I", "Q", "U", "DoLP", "ErrI", "ErrQ", "ErrU", "ErrDoLP", "theta0", "thetav", "faipfai0"}
+    lat_candidates = {"datalat", "latitude", "lat"}
+    lon_candidates = {"datalon", "longitude", "lon"}
+    try:
+        with xr.open_dataset(path) as ds:
+            vars_set = set(ds.variables)
+            return required_core.issubset(vars_set) and bool(vars_set & lat_candidates) and bool(vars_set & lon_candidates)
+    except Exception:
+        return False
+
+def _resolve_args(argv: list[str] | None = None) -> argparse.Namespace | None:
     p = argparse.ArgumentParser()
     p.add_argument("--inputs", nargs="+", help="Input NetCDF files (per-view/per-band or mixed)")
     p.add_argument("--output", help="Output merged NetCDF file")
@@ -65,14 +79,24 @@ def _resolve_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.inputs and args.output:
         return args
 
-    # IDE/Spyder direct run: no CLI args, auto-discover inputs in current working directory
+    # IDE/Spyder direct run: no CLI args
     cwd = Path.cwd()
-    auto_inputs = sorted(cwd.glob(DEFAULT_INPUT_GLOB))
+    if DEFAULT_INPUTS:
+        auto_inputs = [Path(i) for i in DEFAULT_INPUTS]
+    else:
+        auto_inputs = sorted(cwd.glob(DEFAULT_INPUT_GLOB))
+        if not auto_inputs:
+            # fallback: search repository root recursively for convenience
+            repo_root = Path(__file__).resolve().parents[1]
+            auto_inputs = sorted(repo_root.rglob(DEFAULT_INPUT_GLOB))
+
+    auto_inputs = [p for p in auto_inputs if _looks_like_airmspi_file(p)]
+
     if not auto_inputs:
-        raise ValueError(
-            "No command-line arguments provided and no NetCDF files found in current folder. "
-            "Run with --inputs/--output or place input .nc files in the working directory."
-        )
+        print("[WARN] Found no AirMSPI-like input NetCDF files.")
+        print("       Option A: set DEFAULT_INPUTS at top of this script.")
+        print("       Option B: run with --inputs ... --output ...")
+        return None
 
     args.inputs = [str(p) for p in auto_inputs]
     args.output = str(cwd / DEFAULT_OUTPUT)
@@ -88,6 +112,8 @@ def _resolve_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = _resolve_args(argv)
+    if args is None:
+        return
 
     input_files = [Path(i) for i in args.inputs]
     if not input_files:
