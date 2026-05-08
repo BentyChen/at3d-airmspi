@@ -1,178 +1,153 @@
 #!/usr/bin/env python3
-"""Merge multi-view, multi-band AirMSPI results into one NetCDF.
-
-Output variables and dimensions are aligned with retrieval-style products:
-- Full resolution (dim_x, dim_y): datalon, datalat, dataElevation, dataLand_water_mask
-- Downsampled (dim_x_downsampling, dim_y_downsampling): lon, lat, elevation, Land_water_mask
-- Multi-view/multi-band (dim_x_downsampling, dim_y_downsampling, dim_view, dim_band):
-  I, Q, U, DoLP, ErrI, ErrQ, ErrU, ErrDoLP, theta0, thetav, faipfai0
-"""
-
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable
-
 import numpy as np
 import xarray as xr
+import yaml
 
 
-def _crop_to_factor(a: np.ndarray, factor: int) -> np.ndarray:
-    ny, nx = a.shape
-    ny2 = (ny // factor) * factor
-    nx2 = (nx // factor) * factor
-    if ny2 == 0 or nx2 == 0:
-        raise ValueError(f"shape {a.shape} is too small for factor={factor}")
-    return a[:ny2, :nx2]
+def _load_cfg(cfg_path: str):
+    p = Path(cfg_path)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent / p
+    with open(p, 'r', encoding='utf-8') as f:
+        c = yaml.safe_load(f)
+    root = Path(c['output']['root_dir'])
+    if not root.is_absolute():
+        root = (p.parent / root).resolve()
+    bands = [int(v) for v in c['bands']['wavelength_nm']]
+    views = [int(v) for v in c.get('sensor', {}).get('trajectory', {}).get('cross_track_selected_view_indices', [])]
+    return root, bands, views
 
 
 def _downsample_mean2d(a: np.ndarray, factor: int) -> np.ndarray:
-    c = _crop_to_factor(a, factor)
-    ny, nx = c.shape
-    return np.nanmean(c.reshape(ny // factor, factor, nx // factor, factor), axis=(1, 3))
+    ny, nx = a.shape
+    ny2 = (ny // factor) * factor
+    nx2 = (nx // factor) * factor
+    c = a[:ny2, :nx2]
+    return np.nanmean(c.reshape(ny2 // factor, factor, nx2 // factor, factor), axis=(1, 3))
 
 
-def _choose_first(ds: xr.Dataset, names: Iterable[str]) -> str:
-    for n in names:
-        if n in ds:
-            return n
-    raise KeyError(f"None of the candidate variables exist: {list(names)}")
 
 
-def _to_numpy2d(ds: xr.Dataset, varname: str) -> np.ndarray:
-    arr = ds[varname].values
-    if arr.ndim > 2:
-        arr = np.squeeze(arr)
-    if arr.ndim != 2:
-        raise ValueError(f"{varname} must be 2D after squeeze, got {arr.shape}")
-    return np.asarray(arr, dtype=np.float64)
+def _resolve_view_indices(ds: xr.Dataset, selected_views: list[int]) -> list[int]:
+    nview_all = int(ds.sizes['view'])
+    if not selected_views:
+        return list(range(nview_all))
 
+    # If file already contains only selected views (common case), keep all
+    if max(selected_views) >= nview_all:
+        # try matching by view labels like "view_1", "view_3"
+        if 'view' in ds.coords:
+            labels = [str(v) for v in ds['view'].values]
+            mapped = []
+            for v in selected_views:
+                key = f'view_{v}'
+                if key in labels:
+                    mapped.append(labels.index(key))
+            if mapped:
+                return mapped
+        return list(range(nview_all))
 
-def main() -> None:
-    p = argparse.ArgumentParser()
-    p.add_argument("--inputs", nargs="+", required=True, help="Input NetCDF files (per-view/per-band or mixed)")
-    p.add_argument("--output", required=True, help="Output merged NetCDF file")
-    p.add_argument("--factor", type=int, default=25, help="Downsampling factor (default: 25)")
-    args = p.parse_args()
+    return [v - 1 for v in selected_views]
 
-    input_files = [Path(i) for i in args.inputs]
-    if not input_files:
-        raise ValueError("No input files provided")
+def main(config: str = 'config_v6a.yaml', factor: int = 25, output: str | None = None):
+    root_dir, bands, selected_views = _load_cfg(config)
+    files = [root_dir / f'AirMSPI_{b}nm.nc' for b in bands]
+    miss = [str(f) for f in files if not f.exists()]
+    if miss:
+        raise FileNotFoundError(f'Missing band files: {miss}')
 
-    opened = [xr.open_dataset(f) for f in input_files]
+    opened = [xr.open_dataset(f) for f in files]
+    d0 = opened[0]
 
-    lat_name = _choose_first(opened[0], ["datalat", "latitude", "lat"])
-    lon_name = _choose_first(opened[0], ["datalon", "longitude", "lon"])
-    elev_name = _choose_first(opened[0], ["dataElevation", "elevation"])
-    lwm_name = _choose_first(opened[0], ["dataLand_water_mask", "Land_water_mask", "land_water_mask"])
+    # full-res geometry (single-band文件没有lat/lon，先用像素网格填充)
+    ny_full = int(d0.sizes['y'])
+    nx_full = int(d0.sizes['x'])
+    datalat = np.full((ny_full, nx_full), np.nan, dtype=np.float64)
+    datalon = np.full((ny_full, nx_full), np.nan, dtype=np.float64)
+    dataElevation = np.zeros((ny_full, nx_full), dtype=np.float64)
+    dataLandWater = np.ones((ny_full, nx_full), dtype=np.float64)
 
-    datalat = _to_numpy2d(opened[0], lat_name)
-    datalon = _to_numpy2d(opened[0], lon_name)
-    data_elev = _to_numpy2d(opened[0], elev_name)
-    data_lwm = _to_numpy2d(opened[0], lwm_name)
+    # downsampled registered grid
+    ny_ds = int(d0.sizes['y_gds'])
+    nx_ds = int(d0.sizes['x_gds'])
+    view_idx = _resolve_view_indices(d0, selected_views)
+    nview = len(view_idx)
+    nband = len(bands)
 
-    lat_ds = _downsample_mean2d(datalat, args.factor)
-    lon_ds = _downsample_mean2d(datalon, args.factor)
-    elev_ds = _downsample_mean2d(data_elev, args.factor)
-    lwm_ds = _downsample_mean2d(data_lwm, args.factor)
+    I = np.full((ny_ds, nx_ds, nview, nband), np.nan, dtype=np.float64)
+    Q = np.full_like(I, np.nan)
+    U = np.full_like(I, np.nan)
+    DoLP = np.full_like(I, np.nan)
+    thetav = np.full_like(I, np.nan)
+    faipfai0 = np.full_like(I, np.nan)
+    theta0 = np.full_like(I, np.nan)
+    dataI = np.full((nview, nband, ny_full, nx_full), np.nan, dtype=np.float64)
 
-    stack = []
-    bands_ref = None
-    for ds in opened:
-        i_name = _choose_first(ds, ["I"])
-        q_name = _choose_first(ds, ["Q"])
-        u_name = _choose_first(ds, ["U"])
-        dolp_name = _choose_first(ds, ["DoLP"])
-        erri_name = _choose_first(ds, ["ErrI"])
-        errq_name = _choose_first(ds, ["ErrQ"])
-        erru_name = _choose_first(ds, ["ErrU"])
-        errdolp_name = _choose_first(ds, ["ErrDoLP"])
-        theta0_name = _choose_first(ds, ["theta0"])
-        thetav_name = _choose_first(ds, ["thetav"])
-        faipfai0_name = _choose_first(ds, ["faipfai0"])
+    for ib, ds in enumerate(opened):
+        I[..., ib] = np.transpose(ds['I_downsampled_registered'].values[view_idx, :, :], (1, 2, 0))
+        Q[..., ib] = np.transpose(ds['Q_downsampled_registered'].values[view_idx, :, :], (1, 2, 0))
+        U[..., ib] = np.transpose(ds['U_downsampled_registered'].values[view_idx, :, :], (1, 2, 0))
+        DoLP[..., ib] = np.transpose(ds['DoLP_downsampled_registered'].values[view_idx, :, :], (1, 2, 0))
+        thetav[..., ib] = np.transpose(ds['VZA_downsampled_registered'].values[view_idx, :, :], (1, 2, 0))
+        faipfai0[..., ib] = np.transpose(ds['RAA_downsampled_registered'].values[view_idx, :, :], (1, 2, 0))
+        theta0_val = float(np.nanmean(ds['theta0_original'].values)) if 'theta0_original' in ds else 0.0
+        theta0[..., ib] = theta0_val
+        dataI[:, ib, :, :] = ds['I_original'].values[view_idx, :, :]
 
-        band_name = "band" if "band" in ds.dims else ("dim_band" if "dim_band" in ds.dims else None)
-        if band_name is None:
-            # fallback: infer single band
-            bands = np.array([np.nan], dtype=np.float64)
-        else:
-            bands = np.asarray(ds[band_name].values, dtype=np.float64)
+    # keep downsampled geo fields aligned with registered-downsample grid (y_gds, x_gds)
+    lat = np.full((ny_ds, nx_ds), np.nan, dtype=np.float64)
+    lon = np.full((ny_ds, nx_ds), np.nan, dtype=np.float64)
+    elevation = np.zeros((ny_ds, nx_ds), dtype=np.float64)
+    land = np.ones((ny_ds, nx_ds), dtype=np.float64)
 
-        if bands_ref is None:
-            bands_ref = bands
-        elif len(bands_ref) != len(bands):
-            raise ValueError("All inputs must have the same band size")
-
-        stack.append(
-            dict(
-                I=np.asarray(ds[i_name].values, dtype=np.float64),
-                Q=np.asarray(ds[q_name].values, dtype=np.float64),
-                U=np.asarray(ds[u_name].values, dtype=np.float64),
-                DoLP=np.asarray(ds[dolp_name].values, dtype=np.float64),
-                ErrI=np.asarray(ds[erri_name].values, dtype=np.float64),
-                ErrQ=np.asarray(ds[errq_name].values, dtype=np.float64),
-                ErrU=np.asarray(ds[erru_name].values, dtype=np.float64),
-                ErrDoLP=np.asarray(ds[errdolp_name].values, dtype=np.float64),
-                theta0=np.asarray(ds[theta0_name].values, dtype=np.float64),
-                thetav=np.asarray(ds[thetav_name].values, dtype=np.float64),
-                faipfai0=np.asarray(ds[faipfai0_name].values, dtype=np.float64),
-            )
-        )
-
-    # Expected shape per file: (dim_x_downsampling, dim_y_downsampling, dim_band)
-    keys = list(stack[0].keys())
-    merged = {k: np.stack([s[k] for s in stack], axis=2) for k in keys}  # -> x, y, view, band
-
-    nx_ds, ny_ds = lat_ds.shape
-    nview = len(stack)
-    nband = merged["I"].shape[-1]
+    ErrI = np.zeros_like(I)
+    ErrQ = np.zeros_like(I)
+    ErrU = np.zeros_like(I)
+    ErrDoLP = np.zeros_like(I)
 
     out = xr.Dataset(
         data_vars={
-            "DoLP": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["DoLP"]),
-            "datalon": (("dim_x", "dim_y"), datalon),
-            "lon": (("dim_x_downsampling", "dim_y_downsampling"), lon_ds),
-            "Height_AirMSPI": (("height_dim", "height_dim2"), np.array([[20.0]], dtype=np.float64)),
-            "thetav": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["thetav"]),
-            "Land_water_mask": (("dim_x_downsampling", "dim_y_downsampling"), lwm_ds),
-            "elevation": (("dim_x_downsampling", "dim_y_downsampling"), elev_ds),
-            "datalat": (("dim_x", "dim_y"), datalat),
-            "Band_AirMSPI": (("dim_band", "band_scalar"), np.asarray(bands_ref).reshape(-1, 1)),
-            "Q": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["Q"]),
-            "dataLand_water_mask": (("dim_x", "dim_y"), data_lwm),
-            "lat": (("dim_x_downsampling", "dim_y_downsampling"), lat_ds),
-            "ErrI": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["ErrI"]),
-            "U": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["U"]),
-            "ErrU": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["ErrU"]),
-            "dataElevation": (("dim_x", "dim_y"), data_elev),
-            "faipfai0": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["faipfai0"]),
-            "theta0": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["theta0"]),
-            "ErrQ": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["ErrQ"]),
-            "I": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["I"]),
-            "ErrDoLP": (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), merged["ErrDoLP"]),
-        },
-        coords={
-            "dim_x": np.arange(datalat.shape[0]),
-            "dim_y": np.arange(datalat.shape[1]),
-            "dim_x_downsampling": np.arange(nx_ds),
-            "dim_y_downsampling": np.arange(ny_ds),
-            "dim_view": np.arange(nview),
-            "dim_band": np.arange(nband),
-            "height_dim": [0],
-            "height_dim2": [0],
-            "band_scalar": [0],
-        },
+            'DoLP': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), DoLP),
+            'datalon': (("dim_x", "dim_y"), datalon),
+            'lon': (("dim_x_downsampling", "dim_y_downsampling"), lon),
+            'Height_AirMSPI': (("height_dim", "height_dim2"), np.array([[20.0]], dtype=np.float64)),
+            'thetav': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), thetav),
+            'Land_water_mask': (("dim_x_downsampling", "dim_y_downsampling"), land),
+            'dataI': (("dim_view", "dim_band", "dim_x", "dim_y"), dataI),
+            'elevation': (("dim_x_downsampling", "dim_y_downsampling"), elevation),
+            'datalat': (("dim_x", "dim_y"), datalat),
+            'Band_AirMSPI': (("dim_band", "band_scalar"), np.asarray(bands, dtype=np.float64).reshape(-1, 1)),
+            'Q': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), Q),
+            'dataLand_water_mask': (("dim_x", "dim_y"), dataLandWater),
+            'lat': (("dim_x_downsampling", "dim_y_downsampling"), lat),
+            'ErrI': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), ErrI),
+            'U': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), U),
+            'ErrU': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), ErrU),
+            'dataElevation': (("dim_x", "dim_y"), dataElevation),
+            'faipfai0': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), faipfai0),
+            'theta0': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), theta0),
+            'ErrQ': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), ErrQ),
+            'I': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), I),
+            'ErrDoLP': (("dim_x_downsampling", "dim_y_downsampling", "dim_view", "dim_band"), ErrDoLP),
+        }
     )
 
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    out.to_netcdf(args.output)
+    out_path = Path(output) if output else (root_dir / 'AirMSPI_multiview_multiband.nc')
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_netcdf(out_path)
     for ds in opened:
         ds.close()
-    print(f"Saved merged file: {args.output}")
-    print(f"dims: dim_x={datalat.shape[0]}, dim_y={datalat.shape[1]}, "
-          f"dim_x_downsampling={nx_ds}, dim_y_downsampling={ny_ds}, dim_view={nview}, dim_band={nband}")
+    print(f'Saved: {out_path}')
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Merge single-band AirMSPI_*nm.nc files into one multiband product')
+    parser.add_argument('--config', type=str, default='config_v6a.yaml', help='Path to config file')
+    parser.add_argument('--factor', type=int, default=25, help='Downsampling factor')
+    parser.add_argument('--output', type=str, default=None, help='Output merged NetCDF path')
+    args = parser.parse_args()
+    main(config=args.config, factor=args.factor, output=args.output)
