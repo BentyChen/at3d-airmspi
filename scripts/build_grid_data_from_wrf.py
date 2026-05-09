@@ -178,8 +178,8 @@ def main() -> None:
 
     out_path = grid_data_builder.write_extended_grid_csv(str(out), df, geom, options)
     print(f"config: {config_path}")
-    print(f"q_field={wrf_cfg["q_field"]}, q_scale={q_scale}, q_max={q_max}")
-    print(f"cv range [g/m^3]: min={float(np.nanmin(df["cv"])):.6g}, max={float(np.nanmax(df["cv"])):.6g}")
+    print(f"q_field={wrf_cfg['q_field']}, q_scale={q_scale}, q_max={q_max}")
+    print(f"cv range [g/m^3]: min={float(np.nanmin(df['cv'])):.6g}, max={float(np.nanmax(df['cv'])):.6g}")
     print(f"wrote: {out_path}")
 
 
