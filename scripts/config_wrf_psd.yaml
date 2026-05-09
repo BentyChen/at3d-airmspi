@@ -1,6 +1,6 @@
 wrf_input:
-  path: "../data/les/wrfout_W12F7R4"
-  time_index: 79
+  path: "../data/les/wrfout_W12F7R4_t79.nc"
+  time_index: 0
   q_field: "QVAPOR"
   q_scale: 1.0e-3   # scale raw field before conversion to cv; helps avoid unrealistically large AOD
   q_max: null       # optional cap on scaled field
@@ -58,3 +58,11 @@ refractive_index:
 output:
   csv_path: "../data/synthetic_cloud_fields/jpl_les/wrfout_W12F7R4.csv"
   overwrite: true
+
+wrf_extract:
+  source_path: "../data/les/wrfout_W12F7R4"
+  time_index: 79
+  output_path: "../data/les/wrfout_W12F7R4_t79.nc"
+  overwrite: true
+  update_builder_config: true
+
