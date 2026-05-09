@@ -49,5 +49,5 @@ refractive_index:
   background_k: [0.0030, 0.0027, 0.0022, 0.0020, 0.0015, 0.0010, 0.0005]
 
 output:
-  csv_path: "../data/synthetic_cloud_fields/jpl_les/retrieval_2019_0806_1839_extended.csv"
+  csv_path: "../data/synthetic_cloud_fields/jpl_les/wrfout_W12F7R4.csv"
   overwrite: true

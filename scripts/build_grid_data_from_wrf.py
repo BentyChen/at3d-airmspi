@@ -34,10 +34,20 @@ def _compute_z_levels_m(ds: xr.Dataset, t: int, g: float, reduce: str) -> np.nda
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True)
+    ap.add_argument("--config", default=str(Path(__file__).with_name("config_wrf_psd.yaml")))
     args = ap.parse_args()
 
-    cfg = yaml.safe_load(Path(args.config).read_text())
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = Path.cwd() / config_path
+    if not config_path.exists():
+        candidate = Path(__file__).with_name(args.config)
+        if candidate.exists():
+            config_path = candidate
+        else:
+            raise FileNotFoundError(f"Config not found: {args.config}")
+
+    cfg = yaml.safe_load(config_path.read_text())
     wrf_cfg = cfg["wrf_input"]
     z_cfg = cfg["z_source"]
     grid_cfg = cfg["grid"]
@@ -114,6 +124,7 @@ def main() -> None:
         raise FileExistsError(f"Output exists: {out}")
 
     out_path = grid_data_builder.write_extended_grid_csv(str(out), df, geom, options)
+    print(f"config: {config_path}")
     print(f"wrote: {out_path}")
 
 
