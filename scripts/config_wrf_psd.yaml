@@ -1,0 +1,53 @@
+wrf_input:
+  path: "../data/les/wrfout_W12F7R4"
+  time_index: 79
+  q_field: "QVAPOR"
+  lat_var: "XLAT"
+  lon_var: "XLONG"
+
+z_source:
+  method: "from_PH_PHB"
+  g: 9.81
+  reduce: "horizontal_mean"   # horizontal_mean | horizontal_median
+
+grid:
+  coarse: [2, 4, 4]
+  rho_air_kgm3: 1.0
+
+plume_partition:
+  method: "qvapor_threshold"
+  threshold: 0.004
+
+microphysics:
+  mode_fraction_basis: "number"   # number | volume
+
+  fine:
+    rg_um: 0.12
+    sigma_g: 1.6
+  coarse:
+    rg_um: 2.5
+    sigma_g: 2.2
+
+  # plume region fractions
+  plume:
+    fine_fraction_number: 0.95
+    fine_fraction_volume: 0.90
+
+  # background region fractions
+  background:
+    fine_fraction_number: 0.80
+    fine_fraction_volume: 0.75
+
+refractive_index:
+  wavelength_nm: [355, 380, 445, 470, 555, 660, 865]
+  band_index: 0
+
+  plume_n: [1.54, 1.54, 1.53, 1.53, 1.53, 1.52, 1.52]
+  plume_k: [0.030, 0.026, 0.022, 0.020, 0.015, 0.010, 0.005]
+
+  background_n: [1.45, 1.45, 1.45, 1.45, 1.44, 1.44, 1.43]
+  background_k: [0.0030, 0.0027, 0.0022, 0.0020, 0.0015, 0.0010, 0.0005]
+
+output:
+  csv_path: "../data/synthetic_cloud_fields/jpl_les/retrieval_2019_0806_1839_extended.csv"
+  overwrite: true
