@@ -39,6 +39,17 @@ def _latlon_neighbor_dist_km(lat_2d: np.ndarray, lon_2d: np.ndarray) -> tuple[np
     d_east = _haversine_km(lat_2d[:, :-1], lon_2d[:, :-1], lat_2d[:, 1:], lon_2d[:, 1:])
     return d_north, d_east
 
+
+
+def _latlon_from_grid_index(ny: int, nx: int, lat0_deg: float, lon0_deg: float, dx_m: float, dy_m: float) -> tuple[np.ndarray, np.ndarray]:
+    dlat = dy_m / 111320.0
+    dlon = dx_m / (111320.0 * np.cos(np.deg2rad(lat0_deg)))
+    yy = np.arange(ny, dtype=float)[:, None]
+    xx = np.arange(nx, dtype=float)[None, :]
+    lat = lat0_deg + yy * dlat
+    lon = lon0_deg + xx * dlon
+    return lat + np.zeros((ny, nx)), lon + np.zeros((ny, nx))
+
 def _compute_z_levels_m(ds: xr.Dataset, t: int, g: float, reduce: str) -> np.ndarray:
     ph = _get_time_slice(ds["PH"], t)
     phb = _get_time_slice(ds["PHB"], t)
@@ -77,14 +88,29 @@ def main() -> None:
     t = int(wrf_cfg["time_index"])
 
     q3d = _get_time_slice(ds[wrf_cfg["q_field"]], t)
-    lat2d = _get_time_slice(ds[wrf_cfg["lat_var"]], t)
-    lon2d = _get_time_slice(ds[wrf_cfg["lon_var"]], t)
+    lat_raw = _get_time_slice(ds[wrf_cfg["lat_var"]], t)
+    lon_raw = _get_time_slice(ds[wrf_cfg["lon_var"]], t)
+
+    latlon_mode = wrf_cfg.get("latlon_mode", "from_file")
+    if latlon_mode == "from_index":
+        ny, nx = lat_raw.shape
+        lat2d, lon2d = _latlon_from_grid_index(
+            ny=ny,
+            nx=nx,
+            lat0_deg=float(wrf_cfg["sw_corner_lat_deg"]),
+            lon0_deg=float(wrf_cfg["sw_corner_lon_deg"]),
+            dx_m=float(wrf_cfg.get("grid_dx_m", 40.0)),
+            dy_m=float(wrf_cfg.get("grid_dy_m", 40.0)),
+        )
+        dx_m_est = float(wrf_cfg.get("grid_dx_m", 40.0))
+        dy_m_est = float(wrf_cfg.get("grid_dy_m", 40.0))
+    else:
+        lat2d, lon2d = lat_raw, lon_raw
+        dx_north_km, dy_east_km = _latlon_neighbor_dist_km(lat2d, lon2d)
+        dx_m_est = float(np.nanmedian(dx_north_km) * 1000.0)
+        dy_m_est = float(np.nanmedian(dy_east_km) * 1000.0)
 
     z_levels_m = _compute_z_levels_m(ds, t, g=float(z_cfg.get("g", 9.81)), reduce=z_cfg.get("reduce", "horizontal_mean"))
-
-    dx_north_km, dy_east_km = _latlon_neighbor_dist_km(lat2d, lon2d)
-    dx_m_est = float(np.nanmedian(dx_north_km) * 1000.0)
-    dy_m_est = float(np.nanmedian(dy_east_km) * 1000.0)
 
     df, geom, options = grid_data_builder.build_from_les_arrays(
         qvapor_zyx=q3d,

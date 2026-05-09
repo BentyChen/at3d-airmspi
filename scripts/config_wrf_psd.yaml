@@ -4,6 +4,11 @@ wrf_input:
   q_field: "QVAPOR"
   lat_var: "XLAT"
   lon_var: "XLONG"
+  latlon_mode: "from_index"  # from_file | from_index
+  sw_corner_lat_deg: 47.938
+  sw_corner_lon_deg: -118.540
+  grid_dx_m: 40.0
+  grid_dy_m: 40.0
 
 z_source:
   method: "from_PH_PHB"
