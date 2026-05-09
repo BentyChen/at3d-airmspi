@@ -2,6 +2,8 @@ wrf_input:
   path: "../data/les/wrfout_W12F7R4"
   time_index: 79
   q_field: "QVAPOR"
+  q_scale: 1.0e-3   # scale raw field before conversion to cv; helps avoid unrealistically large AOD
+  q_max: null       # optional cap on scaled field
   lat_var: "XLAT"
   lon_var: "XLONG"
   latlon_mode: "from_index"  # from_file | from_index

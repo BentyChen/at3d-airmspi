@@ -87,7 +87,13 @@ def main() -> None:
     ds = xr.open_dataset(wrf_cfg["path"], engine="netcdf4")
     t = int(wrf_cfg["time_index"])
 
-    q3d = _get_time_slice(ds[wrf_cfg["q_field"]], t)
+    q3d_raw = _get_time_slice(ds[wrf_cfg["q_field"]], t)
+    q_scale = float(wrf_cfg.get("q_scale", 1.0e-3))
+    q3d = np.maximum(q3d_raw, 0.0) * q_scale
+    q_max = wrf_cfg.get("q_max")
+    if q_max is not None:
+        q3d = np.minimum(q3d, float(q_max))
+
     lat_raw = _get_time_slice(ds[wrf_cfg["lat_var"]], t)
     lon_raw = _get_time_slice(ds[wrf_cfg["lon_var"]], t)
 
@@ -172,6 +178,8 @@ def main() -> None:
 
     out_path = grid_data_builder.write_extended_grid_csv(str(out), df, geom, options)
     print(f"config: {config_path}")
+    print(f"q_field={wrf_cfg["q_field"]}, q_scale={q_scale}, q_max={q_max}")
+    print(f"cv range [g/m^3]: min={float(np.nanmin(df["cv"])):.6g}, max={float(np.nanmax(df["cv"])):.6g}")
     print(f"wrote: {out_path}")
 
 
