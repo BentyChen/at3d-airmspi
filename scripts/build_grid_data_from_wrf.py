@@ -22,6 +22,23 @@ def _get_time_slice(da: xr.DataArray, t: int) -> np.ndarray:
     return np.asarray(da.isel(Time=t).values)
 
 
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    p1 = np.deg2rad(lat1)
+    p2 = np.deg2rad(lat2)
+    dphi = np.deg2rad(lat2 - lat1)
+    dlambda = np.deg2rad(lon2 - lon1)
+    a = np.sin(dphi / 2.0) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dlambda / 2.0) ** 2
+    return 2.0 * r * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+
+
+def _latlon_neighbor_dist_km(lat_2d: np.ndarray, lon_2d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    d_north = _haversine_km(lat_2d[:-1, :], lon_2d[:-1, :], lat_2d[1:, :], lon_2d[1:, :])
+    d_east = _haversine_km(lat_2d[:, :-1], lon_2d[:, :-1], lat_2d[:, 1:], lon_2d[:, 1:])
+    return d_north, d_east
+
 def _compute_z_levels_m(ds: xr.Dataset, t: int, g: float, reduce: str) -> np.ndarray:
     ph = _get_time_slice(ds["PH"], t)
     phb = _get_time_slice(ds["PHB"], t)
@@ -65,13 +82,17 @@ def main() -> None:
 
     z_levels_m = _compute_z_levels_m(ds, t, g=float(z_cfg.get("g", 9.81)), reduce=z_cfg.get("reduce", "horizontal_mean"))
 
+    dx_north_km, dy_east_km = _latlon_neighbor_dist_km(lat2d, lon2d)
+    dx_m_est = float(np.nanmedian(dx_north_km) * 1000.0)
+    dy_m_est = float(np.nanmedian(dy_east_km) * 1000.0)
+
     df, geom, options = grid_data_builder.build_from_les_arrays(
         qvapor_zyx=q3d,
         z_levels_m=z_levels_m,
         lat_2d=lat2d,
         lon_2d=lon2d,
-        dx_m=float(np.nanmedian(grid_data_builder._latlon_neighbor_dist_km(lat2d, lon2d)[0]) * 1000.0),
-        dy_m=float(np.nanmedian(grid_data_builder._latlon_neighbor_dist_km(lat2d, lon2d)[1]) * 1000.0),
+        dx_m=dx_m_est,
+        dy_m=dy_m_est,
         coarse=tuple(int(v) for v in grid_cfg["coarse"]),
         rho_air_kgm3=float(grid_cfg["rho_air_kgm3"]),
         default_reff=12.0,
