@@ -1796,6 +1796,22 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             return True
         return mode_id == mode_selection
 
+    def _mode_fraction_array(scatterer, mode_id: str, reference: np.ndarray) -> np.ndarray:
+        """Return the fraction to use for a mode in the current selection mode.
+
+        When a single mode is selected, that selected mode represents the full
+        aerosol population for this run, so its fraction is forced to 1 instead
+        of being read from the CSV. Non-selected modes get 0 and are skipped by
+        callers via `_mode_selected`.
+        """
+        if mode_selection in {"mode1", "mode2"}:
+            return np.ones_like(reference, dtype=float) if mode_id == mode_selection else np.zeros_like(reference, dtype=float)
+
+        frac_name = f"{mode_id}_fraction"
+        if frac_name in scatterer:
+            return np.asarray(scatterer[frac_name].data, dtype=float)
+        return np.ones_like(reference, dtype=float)
+
     # Build scalar reff/veff for AT3D from extended mode columns when available.
     mode_reff_vars = sorted([v for v in cloud_scatterer.data_vars if v.startswith('mode') and v.endswith('_reff')])
     mode_veff_vars = sorted([v for v in cloud_scatterer.data_vars if v.startswith('mode') and v.endswith('_veff')])
@@ -1807,9 +1823,8 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             mode_id = v.split('_')[0]  # mode1
             if not _mode_selected(mode_id):
                 continue
-            frac_name = f"{mode_id}_fraction"
-            frac = np.asarray(cloud_scatterer[frac_name].data, dtype=float) if frac_name in cloud_scatterer else np.ones_like(num)
             val = np.asarray(cloud_scatterer[v].data, dtype=float)
+            frac = _mode_fraction_array(cloud_scatterer, mode_id, val)
             mask = np.isfinite(frac) & np.isfinite(val) & (frac > 0)
             num[mask] += frac[mask] * val[mask]
             den[mask] += frac[mask]
@@ -1823,9 +1838,8 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             mode_id = v.split('_')[0]
             if not _mode_selected(mode_id):
                 continue
-            frac_name = f"{mode_id}_fraction"
-            frac = np.asarray(cloud_scatterer[frac_name].data, dtype=float) if frac_name in cloud_scatterer else np.ones_like(num)
             val = np.asarray(cloud_scatterer[v].data, dtype=float)
+            frac = _mode_fraction_array(cloud_scatterer, mode_id, val)
             mask = np.isfinite(frac) & np.isfinite(val) & (frac > 0)
             num[mask] += frac[mask] * val[mask]
             den[mask] += frac[mask]
@@ -1985,19 +1999,15 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
     cloud_scatterer_on_rte_grid['delx'] = xr.DataArray(float(np.asarray(rte_grid.delx).reshape(-1)[0]))
     cloud_scatterer_on_rte_grid['dely'] = xr.DataArray(float(np.asarray(rte_grid.dely).reshape(-1)[0]))
 
-    # Optional single-mode selection: scale total density by selected mode fraction.
+    # Optional single-mode selection: selected mode represents the full aerosol
+    # population, so keep total density unchanged and force the selected mode
+    # fraction to 1 for all downstream mode-weighted calculations.
     if mode_selection in {"mode1", "mode2"}:
         frac_name = f"{mode_selection}_fraction"
-        if frac_name in cloud_scatterer_on_rte_grid:
-            frac = np.asarray(cloud_scatterer_on_rte_grid[frac_name].data, dtype=float)
-            frac = np.clip(np.nan_to_num(frac, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
-            dens = np.asarray(cloud_scatterer_on_rte_grid["density"].data, dtype=float)
-            cloud_scatterer_on_rte_grid["density"] = (
-                cloud_scatterer_on_rte_grid["density"].dims,
-                dens * frac
-            )
-        else:
-            print(f"⚠️ mode_selection={mode_selection} but '{frac_name}' not found; density unchanged.")
+        cloud_scatterer_on_rte_grid[frac_name] = (
+            cloud_scatterer_on_rte_grid["density"].dims,
+            np.ones_like(np.asarray(cloud_scatterer_on_rte_grid["density"].data, dtype=float))
+        )
 
     # Recompute scalar reff/veff from selected mode(s) on RTE grid when mode fields exist.
     mode_reff_vars_rte_all = sorted([v for v in cloud_scatterer_on_rte_grid.data_vars if v.startswith('mode') and v.endswith('_reff')])
@@ -2009,9 +2019,8 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             mode_id = v.split('_')[0]
             if not _mode_selected(mode_id):
                 continue
-            frac_name = f"{mode_id}_fraction"
-            frac = np.asarray(cloud_scatterer_on_rte_grid[frac_name].data, dtype=float) if frac_name in cloud_scatterer_on_rte_grid else np.ones_like(num)
             arr = np.asarray(cloud_scatterer_on_rte_grid[v].data, dtype=float)
+            frac = _mode_fraction_array(cloud_scatterer_on_rte_grid, mode_id, arr)
             m = np.isfinite(arr) & np.isfinite(frac) & (frac > 0)
             num[m] += frac[m] * arr[m]
             den[m] += frac[m]
@@ -2024,9 +2033,8 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             mode_id = v.split('_')[0]
             if not _mode_selected(mode_id):
                 continue
-            frac_name = f"{mode_id}_fraction"
-            frac = np.asarray(cloud_scatterer_on_rte_grid[frac_name].data, dtype=float) if frac_name in cloud_scatterer_on_rte_grid else np.ones_like(num)
             arr = np.asarray(cloud_scatterer_on_rte_grid[v].data, dtype=float)
+            frac = _mode_fraction_array(cloud_scatterer_on_rte_grid, mode_id, arr)
             m = np.isfinite(arr) & np.isfinite(frac) & (frac > 0)
             num[m] += frac[m] * arr[m]
             den[m] += frac[m]
@@ -2266,9 +2274,8 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
         mode_id = v.split('_')[0]
         if not _mode_selected(mode_id):
             continue
-        frac_name = f"{mode_id}_fraction"
-        frac = np.asarray(cloud_scatterer_on_rte_grid[frac_name].data, dtype=float) if frac_name in cloud_scatterer_on_rte_grid else np.ones_like(reff_data)
         arr = np.asarray(cloud_scatterer_on_rte_grid[v].data, dtype=float)
+        frac = _mode_fraction_array(cloud_scatterer_on_rte_grid, mode_id, arr)
         m = np.isfinite(arr) & np.isfinite(frac) & (frac > 0)
         if np.any(m):
             reff_candidates.append(arr[m])
@@ -2276,9 +2283,8 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
         mode_id = v.split('_')[0]
         if not _mode_selected(mode_id):
             continue
-        frac_name = f"{mode_id}_fraction"
-        frac = np.asarray(cloud_scatterer_on_rte_grid[frac_name].data, dtype=float) if frac_name in cloud_scatterer_on_rte_grid else np.ones_like(veff_data)
         arr = np.asarray(cloud_scatterer_on_rte_grid[v].data, dtype=float)
+        frac = _mode_fraction_array(cloud_scatterer_on_rte_grid, mode_id, arr)
         m = np.isfinite(arr) & np.isfinite(frac) & (frac > 0)
         if np.any(m):
             veff_candidates.append(arr[m])
