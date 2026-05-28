@@ -521,7 +521,7 @@ def cross_track_scan_projection(
             v_out = -look_dir  # scene->sensor
             x.append(pos[0]); y.append(pos[1]); z.append(pos[2])
             mu.append(v_out[2])
-            phi.append((np.arctan2(v_out[1], v_out[0]) + 2*np.pi) % (2*np.pi))
+            phi.append((np.arctan2(v_out[1], v_out[0]) + np.pi) % (2*np.pi))
 
     sensor = shdom_cross_track_sensor_wrapper(
         x=np.asarray(x, dtype=float),
@@ -699,7 +699,7 @@ def compute_vout_map_from_sensor(sensor_ds):
     nx = int(sensor_ds.attrs['x_resolution'])
     ny = int(sensor_ds.attrs['y_resolution'])
     mu = np.asarray(sensor_ds.cam_mu.data, dtype=float).reshape(ny, nx)
-    phi = np.asarray(sensor_ds.cam_phi.data, dtype=float).reshape(ny, nx)
+    phi = np.asarray(sensor_ds.cam_phi.data+np.pi, dtype=float).reshape(ny, nx)
     sin_theta = np.sqrt(np.clip(1.0 - mu**2, 0.0, 1.0))
     v_out = np.stack([
         sin_theta * np.cos(phi),
@@ -788,7 +788,7 @@ def _compute_angle_maps_from_sensor(
     # - 0 deg points to geographic North (+x in NEU)
     # - increases clockwise (toward +y/East)
     # - direction is photon propagation scene -> sensor (v_out)
-    vaa_map = (np.degrees(np.arctan2(v_out_map[..., 1], v_out_map[..., 0])) + 360.0) % 360.0
+    vaa_map = (np.degrees(np.arctan2(v_out_map[..., 1], v_out_map[..., 0])) + 180) % 360.0
     # Camera-image convention: enforce 0° from image center toward "up" (not down).
     # vaa_map = (360 - vaa_map) % 360
     # vaa_map = (vaa_map + 180.0) % 360.0
@@ -801,7 +801,7 @@ def _compute_angle_maps_from_sensor(
 
     mu0 = np.cos(np.radians(sza))
     mu = np.cos(np.radians(vza_map))
-    cos_sca = -mu0 * mu + np.sqrt(1 - mu0**2) * np.sqrt(1 - mu**2) * np.cos(np.radians(raa_map))
+    cos_sca = mu0 * mu + np.sqrt(1 - mu0**2) * np.sqrt(1 - mu**2) * np.cos(np.radians(raa_map))
     sca_angle = np.degrees(np.arccos(np.clip(cos_sca, -1.0, 1.0)))
     return vza_map, vaa_map, raa_map, sca_angle
 

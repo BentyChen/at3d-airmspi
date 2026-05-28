@@ -10,7 +10,8 @@ import grid_data_builder
 
 # Spyder-friendly editable settings.
 input_nc = "../data/retrieval_1d/2019_0806_1839_N_Pxl25_3_3.nc"
-output_csv = "../data/synthetic_cloud_fields/jpl_les/retrieval_2019_0806_1839_extended.csv"
+# output_csv = "../data/synthetic_cloud_fields/jpl_les/retrieval_2019_0806_1839_extended.csv"
+output_csv = "../data/synthetic_cloud_fields/jpl_les/retrieval_2019_0806_1839_uni_atm_12_12.csv"
 dx_km = "0.16"
 dy_km = "0.16"
 z_levels_km = "0.01:0.5:20"
@@ -19,7 +20,7 @@ mode_count = "2"
 # Uniform-atmosphere mode: keep the grid shape and lat/lon from the nc file,
 # but copy all atmospheric retrieval properties from one input pixel to every
 # horizontal pixel. Pixel indices are 0-based in the original nc array.
-uniform_atmosphere = False
+uniform_atmosphere = True
 uniform_pixel_row = 12
 uniform_pixel_col = 12
 
