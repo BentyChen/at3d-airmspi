@@ -44,6 +44,8 @@ sensor:
     cross_track_selected_view_indices: [1,5]  # 可选：1-based视角序号，如[1,2,3,4,5,6,7,8,9]
     cross_track_case_id: "Case_21_2019_0806_1839"   # 缓存几何参数用
     cross_track_cache_file: "../output/cross_track_cache.json"  # 结果缓存文件
+    cross_track_projection_cache_dir: "../output/cross_track_projection_cache"  # 保存每个视角的camera ray几何
+    cross_track_projection_force_rerun: false  # true: 忽略已保存的cross-track projection缓存并重算
 
 # camera pixel grid for perspective_projection
 camera:
@@ -103,6 +105,8 @@ aerosol:
   veff_clip_max: 1.0
   density_floor: 0.0
   mode_selection: "mode2"   # both | mode1 | mode2
+  mie_lut_dir: "../mie_tables"  # 保存/读取Mie mono-table LUT
+  mie_lut_force_rebuild: false   # true: 忽略已有Mie LUT并重算
 
 # bands:
 #   wavelength_nm: [470]

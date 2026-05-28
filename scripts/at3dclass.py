@@ -57,6 +57,8 @@ class SensorConfig:
     cross_track_selected_view_indices: Optional[List[int]] = None
     cross_track_case_id: Optional[str] = None
     cross_track_cache_file: Optional[str] = None
+    cross_track_projection_cache_dir: Optional[str] = "../output/cross_track_projection_cache"
+    cross_track_projection_force_rerun: bool = False
 
 @dataclass
 class BandsConfig:
@@ -147,3 +149,5 @@ class AerosolConfig:
     veff_clip_max: float = 1.0
     density_floor: float = 0.0
     mode_selection: str = "both"  # both | mode1 | mode2
+    mie_lut_dir: str = "../mie_tables"
+    mie_lut_force_rebuild: bool = False

@@ -106,6 +106,8 @@ def load_config(cfg_path: str):
         ),
         cross_track_case_id=trajectory_cfg.get("cross_track_case_id", None),
         cross_track_cache_file=trajectory_cfg.get("cross_track_cache_file", None),
+        cross_track_projection_cache_dir=trajectory_cfg.get("cross_track_projection_cache_dir", "../output/cross_track_projection_cache"),
+        cross_track_projection_force_rerun=bool(trajectory_cfg.get("cross_track_projection_force_rerun", False)),
     )
     bnd = BandsConfig(
         wavelength_nm=[int(w) for w in cfg["bands"]["wavelength_nm"]],

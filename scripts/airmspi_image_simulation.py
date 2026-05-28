@@ -32,7 +32,7 @@ import json
 from pathlib import Path
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Mapping, Tuple, Optional
 from datetime import datetime
 
 # External libs
@@ -453,6 +453,154 @@ def calculate_sensor_trajectory_cross_track(
         up_vectors.append(np.asarray(up_vec, dtype=float))
     return np.asarray(positions), np.asarray(lookat_vectors), np.asarray(up_vectors), scan_positions, scan_angles
 
+
+
+def _resolve_cache_dir(path_like: Optional[str], default_relative: str) -> Path:
+    """Resolve cache directories relative to the scripts directory by default."""
+    raw = Path(path_like or default_relative)
+    if raw.is_absolute():
+        out = raw
+    else:
+        out = Path(__file__).resolve().parent / raw
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _cache_digest(payload: Mapping[str, Any]) -> str:
+    text = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _cross_track_projection_cache_path(cache_dir: Path, payload: Mapping[str, Any]) -> Path:
+    case = str(payload.get("case_id") or "case")
+    view = str(payload.get("view_name") or "view")
+    digest = _cache_digest(payload)[:16]
+    safe_case = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in case)
+    safe_view = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in view)
+    return cache_dir / f"cross_track_projection_{safe_case}_{safe_view}_{digest}.npz"
+
+
+def _sensor_from_cross_track_projection_arrays(cache_npz, stokes, wavelength):
+    sensor = shdom_cross_track_sensor_wrapper(
+        x=np.asarray(cache_npz["x"], dtype=float),
+        y=np.asarray(cache_npz["y"], dtype=float),
+        z=np.asarray(cache_npz["z"], dtype=float),
+        mu=np.asarray(cache_npz["mu"], dtype=float),
+        phi=np.asarray(cache_npz["phi"], dtype=float),
+        stokes=stokes,
+        wavelength=wavelength,
+        fill_ray_variables=True,
+        image_shape=(int(cache_npz["x_resolution"]), int(cache_npz["y_resolution"])),
+    )
+    scan_positions = np.asarray(cache_npz["scan_positions"], dtype=float)
+    scan_angles = np.asarray(cache_npz["scan_angles"], dtype=float)
+    scan_pitch_deg = np.asarray(cache_npz["scan_pitch_deg"], dtype=float)
+    sensor.attrs.update({
+        'projection': 'CrossTrackScan',
+        'x_resolution': int(cache_npz["x_resolution"]),
+        'y_resolution': int(cache_npz["y_resolution"]),
+        'cross_track_scan_angles_deg': scan_angles.astype(float).tolist(),
+        'cross_track_scan_positions': scan_positions.astype(float).tolist(),
+        'cross_track_scan_pitch_deg': scan_pitch_deg.astype(float).tolist(),
+    })
+    return sensor, scan_positions, scan_angles, scan_pitch_deg
+
+
+def cached_cross_track_scan_projection(
+        *, cache_dir: Optional[str], force_rerun: bool, case_id: Optional[str], view_name: str,
+        wavelength, stokes, x1, y1, z1, x2, y2, z2, spacing, scan1_deg, scan2_deg,
+        delscan_deg, pitch_start_deg=None, pitch_end_deg=None, pitch_list_deg=None):
+    """Build or load cached cross-track projection ray geometry."""
+    payload = {
+        "version": 2,
+        "case_id": case_id or "case",
+        "view_name": view_name,
+        "x1": float(x1), "y1": float(y1), "z1": float(z1),
+        "x2": float(x2), "y2": float(y2), "z2": float(z2),
+        "spacing": float(spacing),
+        "scan1_deg": float(scan1_deg),
+        "scan2_deg": float(scan2_deg),
+        "delscan_deg": float(delscan_deg),
+        "pitch_start_deg": None if pitch_start_deg is None else float(pitch_start_deg),
+        "pitch_end_deg": None if pitch_end_deg is None else float(pitch_end_deg),
+        "pitch_list_deg": None if pitch_list_deg is None else [float(v) for v in pitch_list_deg],
+        "phi_convention": "atan2_plus_pi_mod_2pi",
+    }
+    out_dir = _resolve_cache_dir(cache_dir, "../output/cross_track_projection_cache")
+    cache_path = _cross_track_projection_cache_path(out_dir, payload)
+    if cache_path.exists() and not force_rerun:
+        with np.load(cache_path, allow_pickle=False) as cached:
+            result = _sensor_from_cross_track_projection_arrays(cached, stokes=stokes, wavelength=wavelength)
+        print(f"📥 Loaded cross-track projection cache: {cache_path}")
+        return result
+
+    sensor, scan_positions, scan_angles, scan_pitch_deg = cross_track_scan_projection(
+        wavelength=wavelength,
+        stokes=stokes,
+        x1=x1, y1=y1, z1=z1,
+        x2=x2, y2=y2, z2=z2,
+        spacing=spacing,
+        scan1_deg=scan1_deg,
+        scan2_deg=scan2_deg,
+        delscan_deg=delscan_deg,
+        pitch_start_deg=pitch_start_deg,
+        pitch_end_deg=pitch_end_deg,
+        pitch_list_deg=pitch_list_deg,
+    )
+    np.savez_compressed(
+        cache_path,
+        x=np.asarray(sensor.cam_x.data, dtype=float),
+        y=np.asarray(sensor.cam_y.data, dtype=float),
+        z=np.asarray(sensor.cam_z.data, dtype=float),
+        mu=np.asarray(sensor.cam_mu.data, dtype=float),
+        phi=np.asarray(sensor.cam_phi.data, dtype=float),
+        scan_positions=np.asarray(scan_positions, dtype=float),
+        scan_angles=np.asarray(scan_angles, dtype=float),
+        scan_pitch_deg=np.asarray(scan_pitch_deg, dtype=float),
+        x_resolution=int(sensor.attrs.get('x_resolution', scan_angles.size)),
+        y_resolution=int(sensor.attrs.get('y_resolution', scan_positions.shape[0])),
+    )
+    print(f"💾 Saved cross-track projection cache: {cache_path}")
+    return sensor, scan_positions, scan_angles, scan_pitch_deg
+
+
+def _mie_lut_filename(wavelength: float, refractive_index: complex, min_reff: float, max_radius: float) -> str:
+    payload = {
+        "particle_type": "Aerosol",
+        "wavelength": float(wavelength),
+        "minimum_effective_radius": float(min_reff),
+        "max_integration_radius": float(max_radius),
+        "refractive_index_real": float(refractive_index.real),
+        "refractive_index_imag": float(refractive_index.imag),
+        "wavelength_averaging": False,
+        "wavelength_resolution": 0.001,
+    }
+    return f"mie_table_aerosol_{int(round(float(wavelength) * 1000)):04d}nm_{_cache_digest(payload)[:16]}.nc"
+
+
+def get_cached_mie_mono_table(wavelength: float, aerosol_cfg: AerosolConfig):
+    refractive_index = aerosol_cfg.refractive_index_real - aerosol_cfg.refractive_index_imag * 1j
+    min_reff = 0.1
+    max_radius = 65.0
+    lut_dir = _resolve_cache_dir(getattr(aerosol_cfg, "mie_lut_dir", "../mie_tables"), "../mie_tables")
+    lut_path = lut_dir / _mie_lut_filename(wavelength, refractive_index, min_reff, max_radius)
+    if lut_path.exists() and not bool(getattr(aerosol_cfg, "mie_lut_force_rebuild", False)):
+        print(f"📥 Loaded Mie LUT: {lut_path}")
+        return xr.load_dataset(lut_path)
+
+    table = at3d.mie.get_mono_table(
+        particle_type='Aerosol',
+        wavelength_band=(wavelength, wavelength),
+        max_integration_radius=max_radius,
+        minimum_effective_radius=min_reff,
+        refractive_index=refractive_index,
+        relative_dir=str(lut_dir) if not bool(getattr(aerosol_cfg, "mie_lut_force_rebuild", False)) else None,
+        verbose=False
+    )
+    if bool(getattr(aerosol_cfg, "mie_lut_force_rebuild", False)) or not lut_path.exists():
+        table.to_netcdf(lut_path)
+        print(f"💾 Saved Mie LUT: {lut_path}")
+    return table
 
 def cross_track_scan_projection(
         wavelength,
@@ -2117,7 +2265,11 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             stokes = ['I', 'Q', 'U'] if is_polarized else ['I']
             for e in per_view:
                 name = f"view_{int(e['view_index'])}"
-                csensor, scan_positions, scan_angles, scan_pitch_deg = cross_track_scan_projection(
+                csensor, scan_positions, scan_angles, scan_pitch_deg = cached_cross_track_scan_projection(
+                    cache_dir=sen.cross_track_projection_cache_dir,
+                    force_rerun=bool(sen.cross_track_projection_force_rerun),
+                    case_id=sen.cross_track_case_id,
+                    view_name=name,
                     wavelength=wavelength_nm/1000,
                     stokes=stokes,
                     x1=float(e["cross_track_x1"]), y1=float(e["cross_track_y1"]), z1=float(e["cross_track_z1"]),
@@ -2212,19 +2364,12 @@ def build_scene_and_sensors_single_band(sen: SensorConfig,
             float(wavelength),
             float(aerosol_cfg.refractive_index_real),
             float(aerosol_cfg.refractive_index_imag),
+            str(getattr(aerosol_cfg, "mie_lut_dir", "../mie_tables")),
         )
-        if cache_key in _MIE_TABLE_CACHE:
+        if cache_key in _MIE_TABLE_CACHE and not bool(getattr(aerosol_cfg, "mie_lut_force_rebuild", False)):
             mie_mono_tables[wavelength] = _MIE_TABLE_CACHE[cache_key]
         else:
-            mie_mono_tables[wavelength] = at3d.mie.get_mono_table(
-                particle_type='Aerosol',
-                wavelength_band=(wavelength, wavelength),
-                max_integration_radius=65.0,
-                minimum_effective_radius=0.1,
-                refractive_index=aerosol_cfg.refractive_index_real - aerosol_cfg.refractive_index_imag*1j,
-                relative_dir='../mie_tables',
-                verbose=False
-            )
+            mie_mono_tables[wavelength] = get_cached_mie_mono_table(wavelength, aerosol_cfg)
             _MIE_TABLE_CACHE[cache_key] = mie_mono_tables[wavelength]
     t_stage["mie_table"] = time.perf_counter() - t0
         
