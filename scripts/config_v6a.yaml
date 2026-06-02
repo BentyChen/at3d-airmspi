@@ -3,7 +3,7 @@
 # =============================
 
 output:
-  root_dir: "output/airmspi_sim_8_005"
+  root_dir: "output/airmspi_sim_10_003"
   save_png: false
   save_nc: true
   plot_mode: "overwrite"   # "skip" | "if_missing" | "overwrite"
@@ -41,9 +41,11 @@ sensor:
     cross_track_scan1_deg: -15.0     # 左侧最小cross-track扫描角
     cross_track_scan2_deg: 15.0      # 右侧最大cross-track扫描角
     cross_track_delscan_deg: 0.02     # the angle [degl between pixels in the scan 像元间扫描角步长
-    cross_track_selected_view_indices: [1,2,3,4,5,6,7,8,9]  # 可选：1-based视角序号，如[1,2,3,4,5,6,7,8,9]
+    cross_track_selected_view_indices: [1,5]  # 可选：1-based视角序号，如[1,2,3,4,5,6,7,8,9]
     cross_track_case_id: "Case_21_2019_0806_1839"   # 缓存几何参数用
     cross_track_cache_file: "../output/cross_track_cache.json"  # 结果缓存文件
+    cross_track_projection_cache_dir: "../output/cross_track_projection_cache"  # 保存每个视角的camera ray几何
+    cross_track_projection_force_rerun: false  # true: 忽略已保存的cross-track projection缓存并重算
 
 # camera pixel grid for perspective_projection
 camera:
@@ -54,6 +56,8 @@ camera:
 scene:
   # AT3D/SHDOM world coordinates: [x, y, z] = [North, East, Up] (NEU, left-handed).
   input_path: "../data/synthetic_cloud_fields/jpl_les/retrieval_2019_0806_1839_extended.csv"
+  input_path: "../data/synthetic_cloud_fields/jpl_les/wrfout_W12F7R4.csv"
+  input_path: "../data/synthetic_cloud_fields/jpl_les/retrieval_2019_0806_1839_uni_atm_12_12.csv"
   lookat_center_km: [4.5, 3.8, 0.0]  # 关键参数：平移VZA“最低点”在图上的位置（不必在区域几何中心）
   # surface toggles
   enable_brdf: false
@@ -71,7 +75,7 @@ scene:
 # solar geometry in geophysical convention
 solar:
   sza_deg: 35.5    # 主要影响散射角绝对值范围（与VZA共同决定）
-  saa_deg: -35.0   # 主要影响RAA和散射角的方向梯度
+  saa_deg: 145.0   # 主要影响RAA和散射角的方向梯度
 
 # radiative transfer solver parameters
 solver:
@@ -100,7 +104,9 @@ aerosol:
   veff_clip_min: 0.01
   veff_clip_max: 1.0
   density_floor: 0.0
-  mode_selection: "both"   # both | mode1 | mode2
+  mode_selection: "mode2"   # both | mode1 | mode2
+  mie_lut_dir: "../mie_tables"  # 保存/读取Mie mono-table LUT
+  mie_lut_force_rebuild: false   # true: 忽略已有Mie LUT并重算
 
 # bands:
 #   wavelength_nm: [470]
@@ -130,7 +136,7 @@ ground_grid:
   x_max: 10.0
   nx: 600
   y_min: 0.0
-  y_max: 7.0
+  y_max: 10.0
   ny: 240
 
 compute:
@@ -138,4 +144,4 @@ compute:
 
 ground_crop:
   x_range: [0.0, 10.0]
-  y_range: [0.0, 7.0]
+  y_range: [0.0, 10.0]

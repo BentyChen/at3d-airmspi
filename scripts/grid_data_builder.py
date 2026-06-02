@@ -11,6 +11,7 @@ Design goals
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -345,6 +346,8 @@ def build_from_retrieval_1d_netcdf(
     wind_vv_var: str = "wind_vv",
     wind_wd_var: str = "wind_wd",
     surface_model: str = "diner",
+    uniform_atmosphere: bool = False,
+    uniform_pixel: Optional[Tuple[int, int]] = None,
 ) -> Tuple[pd.DataFrame, GridGeometry, ExtendedGridOptions]:
     """Convert a retrieval-1D netCDF (2D fields) into extended 3D grid dataframe.
 
@@ -356,6 +359,20 @@ def build_from_retrieval_1d_netcdf(
     cv2d = np.asarray(ds[cv_var].values, dtype=float)
     ny, nx = cv2d.shape
     nz = len(z_levels_km)
+
+    def _make_uniform_2d(arr2d: np.ndarray, name: str) -> np.ndarray:
+        arr2d = np.asarray(arr2d, dtype=float)
+        if not uniform_atmosphere:
+            return arr2d
+        if uniform_pixel is None:
+            row, col = ny // 2, nx // 2
+        else:
+            row, col = int(uniform_pixel[0]), int(uniform_pixel[1])
+        if row < 0 or row >= ny or col < 0 or col >= nx:
+            raise IndexError(f"uniform_pixel={(row, col)} out of bounds for {name} with shape {(ny, nx)}")
+        return np.full((ny, nx), arr2d[row, col], dtype=float)
+
+    cv2d = _make_uniform_2d(cv2d, cv_var)
 
     if reff_vars is None:
         reff_vars = ["R_g_1", "R_g_2"][:mode_count]
@@ -415,8 +432,8 @@ def build_from_retrieval_1d_netcdf(
     # Build vertical density profile from column-integrated Cv_total.
     vd_mode = str(vertical_distribution).lower()
     if vd_mode == 'from_nc' and (hmean_var in ds) and (sigma_var in ds):
-        h2d = _flip_north(_to_2d_field(ds[hmean_var].values, ny, nx, hmean_var, wavelength_index))
-        s2d = _flip_north(_to_2d_field(ds[sigma_var].values, ny, nx, sigma_var, wavelength_index))
+        h2d = _flip_north(_make_uniform_2d(_to_2d_field(ds[hmean_var].values, ny, nx, hmean_var, wavelength_index), hmean_var))
+        s2d = _flip_north(_make_uniform_2d(_to_2d_field(ds[sigma_var].values, ny, nx, sigma_var, wavelength_index), sigma_var))
     elif vd_mode in ('fixed', 'from_nc'):
         h2d = _flip_north(np.full((ny, nx), float(fixed_h_km), dtype=float))
         s2d = _flip_north(np.full((ny, nx), float(fixed_sigma_km), dtype=float))
@@ -446,7 +463,7 @@ def build_from_retrieval_1d_netcdf(
         mode_fraction_2d = [np.ones_like(cv2d)]
     else:
         fine = (
-            _flip_north(_to_2d_field(ds[fine_fraction_var].values, ny, nx, fine_fraction_var, wavelength_index))
+            _flip_north(_make_uniform_2d(_to_2d_field(ds[fine_fraction_var].values, ny, nx, fine_fraction_var, wavelength_index), fine_fraction_var))
             if fine_fraction_var in ds
             else np.full_like(cv2d, 0.5)
         )
@@ -465,8 +482,8 @@ def build_from_retrieval_1d_netcdf(
     base["z"] = Z.reshape(-1)
     base["cv"] = _flatten_xyz(cv3d)
     # Mode1 remains the canonical per-mode definition; scalar reff/veff are omitted to avoid duplicates.
-    mode1_rm2d = _flip_north(_to_2d_field(ds[reff_vars[0]].values, ny, nx, reff_vars[0], wavelength_index)) if reff_vars and reff_vars[0] in ds else np.full_like(cv2d, 0.2)
-    mode1_sig2d = _flip_north(_to_2d_field(ds[veff_vars[0]].values, ny, nx, veff_vars[0], wavelength_index)) if veff_vars and veff_vars[0] in ds else np.full_like(cv2d, default_veff)
+    mode1_rm2d = _flip_north(_make_uniform_2d(_to_2d_field(ds[reff_vars[0]].values, ny, nx, reff_vars[0], wavelength_index), reff_vars[0])) if reff_vars and reff_vars[0] in ds else np.full_like(cv2d, 0.2)
+    mode1_sig2d = _flip_north(_make_uniform_2d(_to_2d_field(ds[veff_vars[0]].values, ny, nx, veff_vars[0], wavelength_index), veff_vars[0])) if veff_vars and veff_vars[0] in ds else np.full_like(cv2d, default_veff)
     if convert_lognormal_params:
         mode1_reff2d = mode1_rm2d * np.exp(2.5 * mode1_sig2d**2)
         mode1_veff2d = np.exp(mode1_sig2d**2) - 1.0
@@ -479,16 +496,16 @@ def build_from_retrieval_1d_netcdf(
     for i_mode in range(mode_count):
         m = i_mode + 1
         frac2d = mode_fraction_2d[i_mode]
-        rm2d = _flip_north(_to_2d_field(ds[reff_vars[i_mode]].values, ny, nx, reff_vars[i_mode], wavelength_index)) if i_mode < len(reff_vars) and reff_vars[i_mode] in ds else mode1_rm2d
-        sig2d = _flip_north(_to_2d_field(ds[veff_vars[i_mode]].values, ny, nx, veff_vars[i_mode], wavelength_index)) if i_mode < len(veff_vars) and veff_vars[i_mode] in ds else mode1_sig2d
+        rm2d = _flip_north(_make_uniform_2d(_to_2d_field(ds[reff_vars[i_mode]].values, ny, nx, reff_vars[i_mode], wavelength_index), reff_vars[i_mode])) if i_mode < len(reff_vars) and reff_vars[i_mode] in ds else mode1_rm2d
+        sig2d = _flip_north(_make_uniform_2d(_to_2d_field(ds[veff_vars[i_mode]].values, ny, nx, veff_vars[i_mode], wavelength_index), veff_vars[i_mode])) if i_mode < len(veff_vars) and veff_vars[i_mode] in ds else mode1_sig2d
         if convert_lognormal_params:
             reff2d = rm2d * np.exp(2.5 * sig2d**2)
             veff2d = np.exp(sig2d**2) - 1.0
         else:
             reff2d = rm2d
             veff2d = sig2d
-        mr2d = _flip_north(_to_2d_field(ds[mr_vars[i_mode]].values, ny, nx, mr_vars[i_mode], wavelength_index)) if i_mode < len(mr_vars) and mr_vars[i_mode] in ds else np.full_like(cv2d, np.nan)
-        mi2d = _flip_north(_to_2d_field(ds[mi_vars[i_mode]].values, ny, nx, mi_vars[i_mode], wavelength_index)) if i_mode < len(mi_vars) and mi_vars[i_mode] in ds else np.full_like(cv2d, np.nan)
+        mr2d = _flip_north(_make_uniform_2d(_to_2d_field(ds[mr_vars[i_mode]].values, ny, nx, mr_vars[i_mode], wavelength_index), mr_vars[i_mode])) if i_mode < len(mr_vars) and mr_vars[i_mode] in ds else np.full_like(cv2d, np.nan)
+        mi2d = _flip_north(_make_uniform_2d(_to_2d_field(ds[mi_vars[i_mode]].values, ny, nx, mi_vars[i_mode], wavelength_index), mi_vars[i_mode])) if i_mode < len(mi_vars) and mi_vars[i_mode] in ds else np.full_like(cv2d, np.nan)
 
         base[f"mode{m}_fraction"] = _flatten_xyz(_broadcast_2d_to_3d(frac2d, nz))
         base[f"mode{m}_reff"] = _flatten_xyz(_broadcast_2d_to_3d(reff2d, nz))
@@ -595,6 +612,8 @@ def run_retrieval_case(
     fixed_h_km: float = 2.0,
     fixed_sigma_km: float = 0.5,
     particle_density_g_cm3: float = 1.6,
+    uniform_atmosphere: bool = False,
+    uniform_pixel: Optional[Tuple[int, int]] = None,
 ) -> Path:
     """Spyder-friendly wrapper: one function call to build CSV from retrieval nc."""
     df, geom, options = build_from_retrieval_1d_netcdf(
@@ -610,8 +629,58 @@ def run_retrieval_case(
         fixed_h_km=fixed_h_km,
         fixed_sigma_km=fixed_sigma_km,
         particle_density_g_cm3=particle_density_g_cm3,
+        uniform_atmosphere=uniform_atmosphere,
+        uniform_pixel=uniform_pixel,
     )
     return write_extended_grid_csv(output_csv, df, geom, options)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> Path:
+    """Command-line entry point for retrieval-1D netCDF to extended CSV conversion."""
+    parser = argparse.ArgumentParser(description="Build extended AT3D grid-data CSV from retrieval-1D netCDF")
+    parser.add_argument("--input-nc", required=True)
+    parser.add_argument("--output-csv", required=True)
+    parser.add_argument("--dx-km", type=float, default=None)
+    parser.add_argument("--dy-km", type=float, default=None)
+    parser.add_argument("--z-levels-km", required=True)
+    parser.add_argument("--mode-count", type=int, default=2)
+    parser.add_argument("--wavelength-index", type=int, default=0)
+    parser.add_argument("--fallback-lat0", type=float, default=35.0)
+    parser.add_argument("--fallback-lon0", type=float, default=-112.0)
+    parser.add_argument("--vertical-distribution", choices=["from_nc", "fixed", "uniform"], default="from_nc")
+    parser.add_argument("--fixed-h-km", type=float, default=2.0)
+    parser.add_argument("--fixed-sigma-km", type=float, default=0.5)
+    parser.add_argument("--particle-density-g-cm3", type=float, default=1.6)
+    parser.add_argument("--uniform-atmosphere", action="store_true", help="Use one retrieval pixel's atmospheric properties at every horizontal pixel")
+    parser.add_argument("--uniform-pixel-row", type=int, default=None, help="0-based input-NC row used when --uniform-atmosphere is set; defaults to center row")
+    parser.add_argument("--uniform-pixel-col", type=int, default=None, help="0-based input-NC column used when --uniform-atmosphere is set; defaults to center column")
+    args = parser.parse_args(argv)
+
+    uniform_pixel = None
+    if args.uniform_pixel_row is not None or args.uniform_pixel_col is not None:
+        if args.uniform_pixel_row is None or args.uniform_pixel_col is None:
+            raise ValueError("Both --uniform-pixel-row and --uniform-pixel-col are required when selecting a uniform pixel")
+        uniform_pixel = (args.uniform_pixel_row, args.uniform_pixel_col)
+
+    out = run_retrieval_case(
+        input_nc=args.input_nc,
+        output_csv=args.output_csv,
+        dx_km=args.dx_km,
+        dy_km=args.dy_km,
+        z_levels_km=parse_z_levels(args.z_levels_km),
+        mode_count=args.mode_count,
+        wavelength_index=args.wavelength_index,
+        fallback_lat0=args.fallback_lat0,
+        fallback_lon0=args.fallback_lon0,
+        vertical_distribution=args.vertical_distribution,
+        fixed_h_km=args.fixed_h_km,
+        fixed_sigma_km=args.fixed_sigma_km,
+        particle_density_g_cm3=args.particle_density_g_cm3,
+        uniform_atmosphere=args.uniform_atmosphere,
+        uniform_pixel=uniform_pixel,
+    )
+    print(f"✅ wrote: {out}")
+    return out
 
 
 if __name__ == "__main__":
@@ -632,6 +701,8 @@ if __name__ == "__main__":
     fixed_h_km = 2.0
     fixed_sigma_km = 0.5
     particle_density_g_cm3 = 1.6
+    uniform_atmosphere = False
+    uniform_pixel = (12, 12)  # 0-based input-NC row/column; used only when uniform_atmosphere=True
 
     out = run_retrieval_case(
         input_nc=input_nc,
@@ -647,5 +718,7 @@ if __name__ == "__main__":
         fixed_h_km=fixed_h_km,
         fixed_sigma_km=fixed_sigma_km,
         particle_density_g_cm3=particle_density_g_cm3,
+        uniform_atmosphere=uniform_atmosphere,
+        uniform_pixel=uniform_pixel,
     )
     print(f"✅ wrote: {out}")
